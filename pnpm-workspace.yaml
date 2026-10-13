@@ -1,0 +1,5 @@
+# Explicit build decisions; unreviewed dependency scripts fail closed.
+strictDepBuilds: true
+allowBuilds:
+  esbuild: false
+  protobufjs: false

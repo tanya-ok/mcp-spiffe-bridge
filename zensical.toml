@@ -1,0 +1,48 @@
+[project]
+site_name = "mcp-spiffe-bridge"
+site_description = "Short-lived workload identity and fail-closed mTLS for MCP servers."
+site_url = "https://tanya-ok.github.io/mcp-spiffe-bridge/"
+repo_url = "https://github.com/tanya-ok/mcp-spiffe-bridge"
+repo_name = "tanya-ok/mcp-spiffe-bridge"
+edit_uri = "edit/main/docs/"
+docs_dir = "docs"
+site_dir = "site"
+extra_css = ["assets/overview.css"]
+nav = [
+  { "Home" = "index.md" },
+  { "Installed demo" = "installed-demo.md" },
+  { "Certificate lifecycle" = "credential-lifecycle.md" },
+  { "Lab guide" = "kubernetes-lab.md" },
+  { "For maintainers" = [
+  { "Publication readiness" = "publication-readiness.md" },
+  { "Development plan" = "development-plan.md" },
+] },
+]
+
+[project.theme]
+language = "en"
+features = ["content.code.copy", "navigation.top", "search.highlight"]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.markdown_extensions]
+pymdownx.tasklist.custom_checkbox = true
+admonition = {}
+attr_list = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
