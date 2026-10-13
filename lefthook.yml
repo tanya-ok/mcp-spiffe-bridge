@@ -1,0 +1,10 @@
+# Git hooks. Install once with: lefthook install
+# (lefthook is a standalone binary: brew install lefthook, or see lefthook.dev)
+pre-commit:
+  parallel: true
+  commands:
+    biome:
+      glob: "*.{ts,mts,cts,js,mjs,cjs,json,jsonc}"
+      run: pnpm exec biome check --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
+    gitleaks:
+      run: gitleaks git --pre-commit --staged --redact --no-banner --config .gitleaks.toml

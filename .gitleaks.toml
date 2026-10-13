@@ -1,0 +1,25 @@
+# Gitleaks config: default ruleset plus generic rules that keep local
+# machine paths and secret-manager references out of the repository.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "personal-home-path"
+description = "Absolute home directory path committed"
+regex = '''/Users/[a-z0-9_-]+/|/home/[a-z0-9_-]+/'''
+path = '''.*'''
+
+[[rules]]
+id = "onepassword-secret-reference"
+description = "1Password op:// secret reference"
+regex = '''op://[A-Za-z0-9._/-]+'''
+
+[allowlist]
+description = "Documented placeholders"
+paths = [
+    '''\.gitleaks\.toml''',
+]
+regexes = [
+    '''YOUR_USER''',
+]
