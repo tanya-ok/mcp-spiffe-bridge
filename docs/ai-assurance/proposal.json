@@ -1,0 +1,114 @@
+{
+  "proposal_schema": 1,
+  "status": "pending-maintainer-review",
+  "installation_authorized": false,
+  "basis_commit": "70e9ae0157cc7c242478114d4f01af39a9dfb3da",
+  "source": {
+    "repository": "ai-assurance",
+    "commit": "353d374a00b43479870a6dee300dd200529cc60c",
+    "version": "0.2.1"
+  },
+  "profile_candidate": {
+    "schema": 2,
+    "project_id": "mcp-spiffe-bridge",
+    "scope": "Node-only synthetic mTLS/SVID validation, credential refresh and safe transport audit; no deployment, Google identity or Python runtime installation.",
+    "ci": {
+      "repository": "tanya-ok/mcp-spiffe-bridge",
+      "workflow": ".github/workflows/ci.yml"
+    },
+    "controls": {
+      "access-boundary": {
+        "applicable": true,
+        "claim": "mTLS peer identity and expected SPIFFE trust domain are validated.",
+        "ci_checks": [
+          "check",
+          "secrets"
+        ]
+      },
+      "data-exposure": {
+        "applicable": true,
+        "claim": "Transport audit output avoids leaking credentials and private peer material.",
+        "ci_checks": [
+          "check",
+          "secrets"
+        ]
+      },
+      "untrusted-instructions": {
+        "applicable": true,
+        "claim": "Malformed or untrusted identity material fails validation without changing authority.",
+        "ci_checks": [
+          "check",
+          "secrets"
+        ]
+      },
+      "consequential-actions": {
+        "applicable": true,
+        "claim": "Credential fetch failures fail closed rather than silently trusting stale identity.",
+        "ci_checks": [
+          "check",
+          "secrets"
+        ]
+      },
+      "evidence-lineage": {
+        "applicable": true,
+        "claim": "Audit outcomes identify transport decisions using synthetic test identities.",
+        "ci_checks": [
+          "check",
+          "secrets"
+        ]
+      },
+      "bounded-claims": {
+        "applicable": true,
+        "claim": "Unit transport results remain distinct from full live SPIRE interoperability.",
+        "ci_checks": [
+          "check",
+          "secrets"
+        ]
+      }
+    }
+  },
+  "evidence_plan": {
+    "access-boundary": {
+      "paths": [
+        "tests/mtls.test.ts",
+        "tests/validator.test.ts",
+        "tests/spiffe-id.test.ts"
+      ],
+      "limitations": "Source inspection only; a passing job is not proof of every claim."
+    },
+    "data-exposure": {
+      "paths": [
+        "tests/audit.test.ts"
+      ],
+      "limitations": "Source inspection only; a passing job is not proof of every claim."
+    },
+    "untrusted-instructions": {
+      "paths": [
+        "tests/validator.test.ts",
+        "tests/fetcher-wire.test.ts"
+      ],
+      "limitations": "Source inspection only; a passing job is not proof of every claim."
+    },
+    "consequential-actions": {
+      "paths": [
+        "tests/fetcher.test.ts",
+        "tests/mtls.test.ts"
+      ],
+      "limitations": "Source inspection only; a passing job is not proof of every claim."
+    },
+    "evidence-lineage": {
+      "paths": [
+        "tests/audit.test.ts"
+      ],
+      "limitations": "Source inspection only; a passing job is not proof of every claim."
+    },
+    "bounded-claims": {
+      "paths": [
+        "README.md",
+        "tests/mtls.test.ts"
+      ],
+      "limitations": "Source inspection only; a passing job is not proof of every claim."
+    }
+  },
+  "remaining_gaps": "Skip installation for this Node-only repository. AI Assurance needs Python 3.12+ and Git in a separate approved verifier environment. The private CI also needs a reviewed collector; no source packet or new external review is authorized."
+}
