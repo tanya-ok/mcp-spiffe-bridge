@@ -68,7 +68,7 @@
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@peculiar/x509": "^1.14.3",
     "@types/node": "^26.6.6",
-    "tsup": "^8.5.1",
+    "tsup": "^9.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
   }
