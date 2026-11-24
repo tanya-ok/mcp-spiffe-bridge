@@ -305,51 +305,51 @@ async function serverFor(own: X509Svid, minTlsVersion?: 'TLSv1.2' | 'TLSv1.3') {
 }
 
 describe('root rotation and established connection policy', () => {
-  it.each([
-    'TLSv1.2',
-    'TLSv1.3',
-  ] as const)('uses overlapping roots and rejects a removed root with %s', async (version) => {
-    const caA = await certificates();
-    const caB = await certificates();
-    const ownA = await caA.issue('spiffe://example.org/mcp/fhir');
-    const ownB = await caB.issue('spiffe://example.org/mcp/fhir');
-    const peerA = await caA.issue(research);
-    const peerB = await caB.issue(research);
-    const overlap = { ...ownB, trustBundle: [...ownA.trustBundle, ...ownB.trustBundle] };
-    const { fetcher, port, transport, audit } = await serverFor(ownA, version);
-    try {
-      const old = await stream(port, ownA, peerA);
-      fetcher.update(overlap);
-      await old.closed;
-      const overlapA = await stream(port, overlap, peerA);
-      const overlapB = await stream(port, overlap, peerB);
-      fetcher.update(ownB);
-      await Promise.all([overlapA.closed, overlapB.closed]);
-      transport.setAuthorizedHandler((_req, res) => res.end('synthetic'));
-      let servedLeaf: Buffer | undefined;
-      expect(
-        (
-          await request(port, ownB, peerB, (raw) => {
-            servedLeaf = raw;
-          })
-        ).status,
-      ).toBe(200);
-      expect(servedLeaf).toEqual(Buffer.from(ownB.certChain[0] ?? []));
-      await expect(request(port, ownB, peerA, undefined, version)).rejects.toThrow();
-      expect(audit.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'auth_failure',
-          denial_reason: expect.stringMatching(
-            /^SVID_INVALID: TLS (certificate verification failed|client certificate required)$/,
-          ),
-        }),
-      );
-    } finally {
-      await transport.stop();
-    }
-    expect(fetcher.watchers.size).toBe(0);
-    expect(fetcher.health.size).toBe(0);
-  });
+  it.each(['TLSv1.2', 'TLSv1.3'] as const)(
+    'uses overlapping roots and rejects a removed root with %s',
+    async (version) => {
+      const caA = await certificates();
+      const caB = await certificates();
+      const ownA = await caA.issue('spiffe://example.org/mcp/fhir');
+      const ownB = await caB.issue('spiffe://example.org/mcp/fhir');
+      const peerA = await caA.issue(research);
+      const peerB = await caB.issue(research);
+      const overlap = { ...ownB, trustBundle: [...ownA.trustBundle, ...ownB.trustBundle] };
+      const { fetcher, port, transport, audit } = await serverFor(ownA, version);
+      try {
+        const old = await stream(port, ownA, peerA);
+        fetcher.update(overlap);
+        await old.closed;
+        const overlapA = await stream(port, overlap, peerA);
+        const overlapB = await stream(port, overlap, peerB);
+        fetcher.update(ownB);
+        await Promise.all([overlapA.closed, overlapB.closed]);
+        transport.setAuthorizedHandler((_req, res) => res.end('synthetic'));
+        let servedLeaf: Buffer | undefined;
+        expect(
+          (
+            await request(port, ownB, peerB, (raw) => {
+              servedLeaf = raw;
+            })
+          ).status,
+        ).toBe(200);
+        expect(servedLeaf).toEqual(Buffer.from(ownB.certChain[0] ?? []));
+        await expect(request(port, ownB, peerA, undefined, version)).rejects.toThrow();
+        expect(audit.log).toHaveBeenCalledWith(
+          expect.objectContaining({
+            event_type: 'auth_failure',
+            denial_reason: expect.stringMatching(
+              /^SVID_INVALID: TLS (certificate verification failed|client certificate required)$/,
+            ),
+          }),
+        );
+      } finally {
+        await transport.stop();
+      }
+      expect(fetcher.watchers.size).toBe(0);
+      expect(fetcher.health.size).toBe(0);
+    },
+  );
 
   it('closes active streams on credential loss and only recovers after a fresh update', async () => {
     const ca = await certificates();
@@ -369,56 +369,56 @@ describe('root rotation and established connection policy', () => {
     }
   });
 
-  it.each([
-    'own',
-    'peer',
-  ])('closes an already-open stream when the %s credential expires', async (kind) => {
-    const ca = await certificates();
-    const expires = new Date(Date.now() + 2200);
-    const own = await ca.issue(
-      'spiffe://example.org/mcp/fhir',
-      kind === 'own' ? expires : undefined,
-    );
-    const peer = await ca.issue(research, kind === 'peer' ? expires : undefined);
-    const { port, transport } = await serverFor(own);
-    try {
-      const active = await stream(port, own, peer);
-      await active.closed;
-      const deadline = Math.min(own.notAfter.getTime(), peer.notAfter.getTime());
-      expect(Date.now()).toBeGreaterThanOrEqual(deadline - 20);
-      expect(Date.now()).toBeLessThan(deadline + 1000);
-    } finally {
-      await transport.stop();
-    }
-  });
-
-  it.each([
-    'TLSv1.2',
-    'TLSv1.3',
-  ] as const)('requires a full handshake for new %s connections', async (version) => {
-    const ca = await certificates();
-    const own = await ca.issue('spiffe://example.org/mcp/fhir');
-    const peer = await ca.issue(research);
-    const { fetcher, port, transport } = await serverFor(own, version);
-    const agent = new https.Agent({ keepAlive: false, maxCachedSessions: 100 });
-    const reused: boolean[] = [];
-    transport.setAuthorizedHandler((_req, res) => res.end('synthetic'));
-    const observe = (_raw: Buffer, socket: import('node:tls').TLSSocket) => {
-      reused.push(socket.isSessionReused());
-      expect(socket.getProtocol()).toBe(version);
-    };
-    try {
-      for (let i = 0; i < 2; i++) {
-        expect((await request(port, own, peer, observe, version, agent)).status).toBe(200);
+  it.each(['own', 'peer'])(
+    'closes an already-open stream when the %s credential expires',
+    async (kind) => {
+      const ca = await certificates();
+      const expires = new Date(Date.now() + 2200);
+      const own = await ca.issue(
+        'spiffe://example.org/mcp/fhir',
+        kind === 'own' ? expires : undefined,
+      );
+      const peer = await ca.issue(research, kind === 'peer' ? expires : undefined);
+      const { port, transport } = await serverFor(own);
+      try {
+        const active = await stream(port, own, peer);
+        await active.closed;
+        const deadline = Math.min(own.notAfter.getTime(), peer.notAfter.getTime());
+        expect(Date.now()).toBeGreaterThanOrEqual(deadline - 20);
+        expect(Date.now()).toBeLessThan(deadline + 1000);
+      } finally {
+        await transport.stop();
       }
-      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
-      expect((await request(port, own, peer, observe, version, agent)).status).toBe(200);
-      expect(reused).toEqual([false, false, false]);
-    } finally {
-      agent.destroy();
-      await transport.stop();
-    }
-  });
+    },
+  );
+
+  it.each(['TLSv1.2', 'TLSv1.3'] as const)(
+    'requires a full handshake for new %s connections',
+    async (version) => {
+      const ca = await certificates();
+      const own = await ca.issue('spiffe://example.org/mcp/fhir');
+      const peer = await ca.issue(research);
+      const { fetcher, port, transport } = await serverFor(own, version);
+      const agent = new https.Agent({ keepAlive: false, maxCachedSessions: 100 });
+      const reused: boolean[] = [];
+      transport.setAuthorizedHandler((_req, res) => res.end('synthetic'));
+      const observe = (_raw: Buffer, socket: import('node:tls').TLSSocket) => {
+        reused.push(socket.isSessionReused());
+        expect(socket.getProtocol()).toBe(version);
+      };
+      try {
+        for (let i = 0; i < 2; i++) {
+          expect((await request(port, own, peer, observe, version, agent)).status).toBe(200);
+        }
+        fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+        expect((await request(port, own, peer, observe, version, agent)).status).toBe(200);
+        expect(reused).toEqual([false, false, false]);
+      } finally {
+        agent.destroy();
+        await transport.stop();
+      }
+    },
+  );
 
   it('refuses TLS 1.2 by default and accepts it only when configured', async () => {
     const ca = await certificates();

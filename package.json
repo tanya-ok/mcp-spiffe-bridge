@@ -48,7 +48,7 @@
   },
   "packageManager": "pnpm@12.14.0",
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && tsc -p tsconfig.build.json && node -e \"require('node:fs').copyFileSync('dist/index.d.ts','dist/index.d.cts')\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -64,12 +64,13 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "~2.4.16",
+    "@biomejs/biome": "~2.6.3",
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@peculiar/x509": "^1.14.3",
+    "@peculiar/x509": "^2.2.0",
     "@types/node": "^26.6.6",
-    "tsup": "^8.5.1",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.12"
+    "reflect-metadata": "^0.2.2",
+    "tsup": "^9.0.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
   }
 }

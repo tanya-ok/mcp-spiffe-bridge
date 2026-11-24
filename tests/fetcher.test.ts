@@ -255,25 +255,28 @@ describe('WorkloadApiSvidFetcher', () => {
     [['example.org'], true],
     [['example.org', 'partner.example.net'], false],
     [['partner.example.net'], false],
-  ])('checks allowedTrustDomains %j against the local trust domain at startup', async (domains, ok) => {
-    const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
-    currentCall.queue.push(responseFor(cert));
-    const bridge = createMcpSpiffeBridge({
-      workloadApi: { socketPath: '/tmp/fake.sock', rpcTimeoutMs: 2000 },
-      validator: {
-        allowedCallers: ['spiffe://example.org/agent/research'],
-        minTtlSeconds: 5,
-        allowedTrustDomains: domains,
-      },
-      transport: { mode: 'stdio-identity-only' },
-    });
-    try {
-      if (ok) await expect(bridge.start()).resolves.toBeUndefined();
-      else await expect(bridge.start()).rejects.toThrow(ConfigInvalidError);
-    } finally {
-      await bridge.stop();
-    }
-  });
+  ])(
+    'checks allowedTrustDomains %j against the local trust domain at startup',
+    async (domains, ok) => {
+      const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
+      currentCall.queue.push(responseFor(cert));
+      const bridge = createMcpSpiffeBridge({
+        workloadApi: { socketPath: '/tmp/fake.sock', rpcTimeoutMs: 2000 },
+        validator: {
+          allowedCallers: ['spiffe://example.org/agent/research'],
+          minTtlSeconds: 5,
+          allowedTrustDomains: domains,
+        },
+        transport: { mode: 'stdio-identity-only' },
+      });
+      try {
+        if (ok) await expect(bridge.start()).resolves.toBeUndefined();
+        else await expect(bridge.start()).rejects.toThrow(ConfigInvalidError);
+      } finally {
+        await bridge.stop();
+      }
+    },
+  );
 });
 
 function responseFor(cert: { certDer: Uint8Array; privateKeyDer: Uint8Array }): FakeResponse {
@@ -370,29 +373,27 @@ describe('bounded stream recovery', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each([
-    'empty',
-    'wrong-key',
-    'wrong-identity',
-    'crl',
-  ])('invalidates rather than ignoring an invalid %s update', async (kind) => {
-    const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
-    const other = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
-    vi.useFakeTimers();
-    const f = recovering(0);
-    currentCall.queue.push(responseFor(cert));
-    await f.getX509Svid();
-    const invalid = responseFor(cert);
-    if (kind === 'empty') invalid.svids = [];
-    if (kind === 'wrong-key' && invalid.svids[0])
-      invalid.svids[0].x509SvidKey = other.privateKeyDer;
-    if (kind === 'wrong-identity' && invalid.svids[0])
-      invalid.svids[0].spiffeId = 'spiffe://example.org/another';
-    if (kind === 'crl') invalid.crl = [new Uint8Array([1])];
-    currentCall.queue.push(invalid);
-    await vi.advanceTimersByTimeAsync(0);
-    await expect(f.getX509Svid()).rejects.toThrow('stream unavailable');
-    expect(callCount).toBe(1);
-    expect(vi.getTimerCount()).toBe(0);
-  });
+  it.each(['empty', 'wrong-key', 'wrong-identity', 'crl'])(
+    'invalidates rather than ignoring an invalid %s update',
+    async (kind) => {
+      const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
+      const other = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
+      vi.useFakeTimers();
+      const f = recovering(0);
+      currentCall.queue.push(responseFor(cert));
+      await f.getX509Svid();
+      const invalid = responseFor(cert);
+      if (kind === 'empty') invalid.svids = [];
+      if (kind === 'wrong-key' && invalid.svids[0])
+        invalid.svids[0].x509SvidKey = other.privateKeyDer;
+      if (kind === 'wrong-identity' && invalid.svids[0])
+        invalid.svids[0].spiffeId = 'spiffe://example.org/another';
+      if (kind === 'crl') invalid.crl = [new Uint8Array([1])];
+      currentCall.queue.push(invalid);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(f.getX509Svid()).rejects.toThrow('stream unavailable');
+      expect(callCount).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 });
