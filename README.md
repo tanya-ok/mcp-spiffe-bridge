@@ -15,12 +15,14 @@ and rotate automatically.
 
 ## Status
 
-- Version 0.0.1, unreleased. The 0.1.0 API is described in
-  [CHANGELOG.md](CHANGELOG.md); it may still change before 1.0.
+- `package.json` version 0.0.1, unreleased. [CHANGELOG.md](CHANGELOG.md)
+  lists the API intended for the first release; the version number is the
+  maintainer's decision.
 - Not published to npm yet. Install from a local checkout.
-- Not yet declared production-ready. Code-level gaps are closed and tested;
-  release, provenance, lab and review gates remain. See
-  [production readiness](docs/production-readiness.md).
+- Code-level gaps are closed and tested, including on a real two-domain SPIRE
+  federation [bench](docs/spire-bench.md). Not declared production-ready until
+  the maintainer-owned gates in [production readiness](docs/production-readiness.md)
+  are closed: independent review, npm publication and the version decision.
 
 ## Requirements
 
@@ -69,14 +71,15 @@ await bridge.start();
 ```
 
 Use `bridge.isReady()` for readiness probes. For durable audit, pass a file
-sink; it fsyncs every event and the request is refused if the write fails:
+sink: `log()` resolves only after the event is fsynced (group commit), a failed
+write refuses the request with 503, and the sink reopens itself with backoff:
 
 ```ts
 import { FileAuditLogger } from 'mcp-spiffe-bridge';
 
-const audit = new FileAuditLogger({ path: '/var/log/mcp/audit.jsonl', maxQueue: 1024 });
+const audit = new FileAuditLogger({ path: '/var/log/mcp/audit.jsonl' });
 // createMcpSpiffeBridge({ ..., audit: { logger: audit } })
-// After rotating the file: await audit.reopen();
+// After renaming the file for rotation: await audit.reopen();
 ```
 
 To trust callers from a federated SPIRE trust domain, name it explicitly and
@@ -106,14 +109,17 @@ caller --mTLS--> listener --> validator (SAN, trust domain, TTL, allowlist)
 ```
 
 - `WorkloadApiSvidFetcher` streams SVIDs and trust bundles, refuses invalid or
-  expired material and reconnects with a bounded budget.
-- `MtlsTransportServer` requires a client certificate, rotates its TLS context
-  without a restart and closes existing connections on every credential change.
-- `SpiffeValidator` applies SPIFFE checks on top of TLS chain verification.
+  expired material and reconnects without limit, with capped backoff and jitter.
+- `MtlsTransportServer` requires a client certificate, binds each peer chain to
+  the anchors of its own trust domain, rotates its TLS context without a
+  restart and drains connections that stay valid.
+- `SpiffeValidator` applies SPIFFE checks (SAN, trust domain, TTL, allowlist).
+- `FileAuditLogger` writes durable JSON Lines audit; `BridgeMetrics` hooks
+  report handshakes, refusals, drops, rotation and reconnects.
 - `getCallerIdentity` exposes the verified caller through `AsyncLocalStorage`.
 
-Details: [credential lifecycle](docs/credential-lifecycle.md) and
-[Kubernetes integration](docs/kubernetes-lab.md).
+Details: [operations](docs/operations.md), [credential lifecycle](docs/credential-lifecycle.md),
+[SPIRE bench](docs/spire-bench.md) and [Kubernetes integration](docs/kubernetes-lab.md).
 
 ## Limits and threat model
 
@@ -124,19 +130,28 @@ Details: [credential lifecycle](docs/credential-lifecycle.md) and
 - Federation is off by default. Domains in `validator.federatedTrustDomains`
   are trusted only while the agent supplies their bundle, and each peer chain
   must lead to the bundle of its own trust domain.
-- CRLs in a Workload API snapshot are enforced at the TLS handshake. When any
-  CRL is present, every issuer in a peer chain needs a current CRL.
+- Caller matchers need an exact trust domain; `spiffe://*/**` and a bare `**`
+  path are rejected.
+- Revocation in practice is short SVID lifetimes. CRL support is experimental:
+  SPIRE 1.16.0 sent no CRLs in the bench. `transport.crlScope` chooses between
+  `all-issuers` (default, fail closed, refuses federated callers whose domain
+  publishes no CRL) and `per-trust-domain`.
 - Authentication only. Per-tool authorization, user identity and OAuth remain
   the consuming application's responsibility.
 - Audit events go to stdout by default. `FileAuditLogger` gives durable local
   delivery; shipping the file to central storage is the deployment's job.
-  TLS handshake denials and rotation events are written best effort.
+  Handshake denials use a rate-limited channel and may be dropped; drops are
+  counted.
 - `stdio-identity-only` mode cannot carry TLS and does not authenticate callers.
+- Node.js 26 or newer only, a deliberate support decision.
 
 ## Documentation
 
 - [Overview](docs/index.md)
+- [Operations](docs/operations.md)
+- [Audit event contract](docs/architecture/contracts/audit-event.md)
 - [Installed package demo](docs/installed-demo.md)
+- [SPIRE bench](docs/spire-bench.md)
 - [Credential lifecycle](docs/credential-lifecycle.md)
 - [Kubernetes integration](docs/kubernetes-lab.md)
 - [Production readiness](docs/production-readiness.md)
@@ -151,6 +166,7 @@ pnpm typecheck
 pnpm lint
 pnpm build
 pnpm run check:package
+pnpm run bench:spire   # real SPIRE federation bench in a Lima VM, see docs/spire-bench.md
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and
