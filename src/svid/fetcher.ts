@@ -254,11 +254,14 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
     const federatedEntries = Object.entries(response.federatedBundles);
     if (federatedEntries.length > 0) {
       const m = new Map<TrustDomainString, readonly Uint8Array[]>();
-      for (const [td, bytes] of federatedEntries) {
+      for (const [key, bytes] of federatedEntries) {
+        // The Workload API keys bundles by trust domain ID (`spiffe://td`); accept bare names too.
+        const td = parseSpiffeId(key.startsWith('spiffe://') ? key : `spiffe://${key}`);
+        if (td?.path !== '' || td.trustDomain === parsedId.trustDomain) continue;
         const parsed = parseCertificateBundle(bytes).map((c) => new Uint8Array(c.rawData));
-        m.set(td as TrustDomainString, parsed);
+        if (parsed.length > 0) m.set(td.trustDomain, parsed);
       }
-      federated = m;
+      if (m.size > 0) federated = m;
     }
 
     const svid: X509Svid = {

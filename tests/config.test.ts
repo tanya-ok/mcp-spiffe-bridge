@@ -30,6 +30,20 @@ describe('validateBridgeOptions', () => {
     expect(() => validateBridgeOptions(bad)).toThrow(ConfigInvalidError);
   });
 
+  it.each([
+    [['partner.example.net'], true],
+    [['spiffe://partner.example.net'], false],
+    [['Partner.Example.Net'], false],
+    [[''], false],
+  ])('validates federatedTrustDomains %j', (domains, ok) => {
+    const input = {
+      ...validBase,
+      validator: { ...validBase.validator, federatedTrustDomains: domains },
+    };
+    if (ok) expect(validateBridgeOptions(input).validator.federatedTrustDomains).toEqual(domains);
+    else expect(() => validateBridgeOptions(input)).toThrow(ConfigInvalidError);
+  });
+
   it('rejects malformed caller matcher', () => {
     const bad = {
       ...validBase,

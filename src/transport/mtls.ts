@@ -14,6 +14,7 @@ import type {
   SvidFetcher,
   SvidValidator,
   TransportOptions,
+  TrustDomainString,
   ValidatedIdentity,
   X509Svid,
 } from '../types.js';
@@ -34,6 +35,8 @@ export interface MtlsTransportServerOptions {
   readonly validator: SvidValidator;
   readonly audit: AuditLogger;
   readonly transport: TransportOptions;
+  /** Foreign trust domains whose federated bundles join the TLS trust store. */
+  readonly federatedTrustDomains?: readonly TrustDomainString[];
 }
 
 /**
@@ -60,7 +63,11 @@ export class MtlsTransportServer {
   private credentialEpoch = 0;
   private ready = false;
 
-  constructor(private readonly opts: MtlsTransportServerOptions) {}
+  private readonly federated: readonly TrustDomainString[];
+
+  constructor(private readonly opts: MtlsTransportServerOptions) {
+    this.federated = opts.federatedTrustDomains ?? [];
+  }
 
   setAuthorizedHandler(handler: AuthorizedRequestHandler): void {
     this.handler = handler;
@@ -79,7 +86,7 @@ export class MtlsTransportServer {
 
     let initialSvid = await this.opts.fetcher.getX509Svid();
     const minVersion = this.opts.transport.minTlsVersion ?? 'TLSv1.3';
-    const initialOpts = svidToHttpsOptions(initialSvid, minVersion);
+    const initialOpts = svidToHttpsOptions(initialSvid, minVersion, this.federated);
 
     this.server = https.createServer(initialOpts, (req, res) => {
       void this.handleRequest(req, res).catch(() => {
@@ -181,7 +188,9 @@ export class MtlsTransportServer {
       this.ready = false;
       this.disconnect();
       try {
-        this.server?.setSecureContext(svidToSecureContextOptions(newSvid, minVersion));
+        this.server?.setSecureContext(
+          svidToSecureContextOptions(newSvid, minVersion, this.federated),
+        );
         this.server?.setTicketKeys(randomBytes(48));
         initialSvid = newSvid;
         this.ready = this.server !== null;
@@ -260,7 +269,7 @@ export class MtlsTransportServer {
     }
 
     const peerDer = new Uint8Array(peerCert.raw);
-    const result = await this.opts.validator.validate(peerDer);
+    const result = await this.opts.validator.validate(peerDer, undefined, peerIssuers(socket));
     if (!result.ok) {
       await this.opts.audit.log(buildAuthFailureEvent(result.error, { requestId }));
       this.deny(res);
@@ -294,9 +303,13 @@ export class MtlsTransportServer {
 
 // ─── TLS option helpers ─────────────────────────────────────────────────
 
-function svidToHttpsOptions(svid: X509Svid, minVersion: MinTlsVersion): https.ServerOptions {
+function svidToHttpsOptions(
+  svid: X509Svid,
+  minVersion: MinTlsVersion,
+  federated: readonly TrustDomainString[],
+): https.ServerOptions {
   return {
-    ...svidToSecureContextOptions(svid, minVersion),
+    ...svidToSecureContextOptions(svid, minVersion, federated),
     minVersion,
     secureOptions: constants.SSL_OP_NO_TICKET,
     requestCert: true,
@@ -307,10 +320,16 @@ function svidToHttpsOptions(svid: X509Svid, minVersion: MinTlsVersion): https.Se
 function svidToSecureContextOptions(
   svid: X509Svid,
   minVersion: MinTlsVersion,
+  federated: readonly TrustDomainString[],
 ): tls.SecureContextOptions {
   const certPem = svid.certChain.map(derToPem.bind(null, 'CERTIFICATE')).join('\n');
   const keyPem = derToPem('PRIVATE KEY', svid.privateKey);
-  const caPem = svid.trustBundle.map(derToPem.bind(null, 'CERTIFICATE')).join('\n');
+  // The validator binds each peer to the bundle of its own trust domain.
+  const roots = [
+    ...svid.trustBundle,
+    ...federated.flatMap((td) => svid.federatedBundles?.get(td) ?? []),
+  ];
+  const caPem = roots.map(derToPem.bind(null, 'CERTIFICATE')).join('\n');
   return {
     cert: certPem,
     key: keyPem,
@@ -319,6 +338,19 @@ function svidToSecureContextOptions(
     minVersion,
     secureOptions: constants.SSL_OP_NO_TICKET,
   };
+}
+
+/** Issuer certificates of the verified peer chain, leaf excluded. */
+function peerIssuers(socket: tls.TLSSocket): Uint8Array[] {
+  const issuers: Uint8Array[] = [];
+  let cert = socket.getPeerCertificate(true);
+  for (let depth = 0; depth < 10 && cert?.issuerCertificate; depth++) {
+    const next = cert.issuerCertificate;
+    if (next === cert || next.raw.equals(cert.raw)) break;
+    issuers.push(new Uint8Array(next.raw));
+    cert = next;
+  }
+  return issuers;
 }
 
 function derToPem(label: string, der: Uint8Array): string {

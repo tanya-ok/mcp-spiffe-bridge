@@ -136,6 +136,39 @@ describe('WorkloadApiSvidFetcher', () => {
     expect(svid.crls).toBeUndefined();
   });
 
+  it('keys federated bundles by trust domain name and drops unusable entries', async () => {
+    const fetcher = makeFetcher();
+    const cert = await makeSpiffeCert({ spiffeId: 'spiffe://td.test/workload/a' });
+    const partner = await makeSpiffeCert({ spiffeId: 'spiffe://partner.test/ca' });
+    const other = await makeSpiffeCert({ spiffeId: 'spiffe://other.test/ca' });
+    currentCall.queue.push({
+      svids: [
+        {
+          spiffeId: 'spiffe://td.test/workload/a',
+          x509Svid: cert.certDer,
+          x509SvidKey: cert.privateKeyDer,
+          bundle: cert.certDer,
+          hint: '',
+        },
+      ],
+      federatedBundles: {
+        'spiffe://partner.test': partner.certDer,
+        'other.test': other.certDer,
+        'spiffe://td.test': other.certDer,
+        'spiffe://bad.test/path': other.certDer,
+        'Not A Domain': other.certDer,
+        'empty.test': new Uint8Array(),
+      },
+      crl: [],
+    });
+    const svid = await fetcher.getX509Svid();
+    expect([...(svid.federatedBundles?.keys() ?? [])].sort()).toEqual([
+      'other.test',
+      'partner.test',
+    ]);
+    expect(svid.federatedBundles?.get('partner.test' as never)).toEqual([partner.certDer]);
+  });
+
   it('surfaces well-formed CRLs from the snapshot', async () => {
     const fetcher = makeFetcher();
     const cert = await makeSpiffeCert({ spiffeId: 'spiffe://td.test/workload/a' });
@@ -287,12 +320,15 @@ describe('WorkloadApiSvidFetcher', () => {
   });
 
   it.each([
-    [['example.org'], true],
-    [['example.org', 'partner.example.net'], false],
-    [['partner.example.net'], false],
+    [['example.org'], undefined, true],
+    [['example.org', 'partner.example.net'], undefined, false],
+    [['partner.example.net'], undefined, false],
+    [['example.org', 'partner.example.net'], ['partner.example.net'], true],
+    [undefined, ['partner.example.net'], true],
+    [undefined, ['example.org'], false],
   ])(
-    'checks allowedTrustDomains %j against the local trust domain at startup',
-    async (domains, ok) => {
+    'checks allowedTrustDomains %j with federatedTrustDomains %j at startup',
+    async (domains, federated, ok) => {
       const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
       currentCall.queue.push(responseFor(cert));
       const bridge = createMcpSpiffeBridge({
@@ -300,7 +336,8 @@ describe('WorkloadApiSvidFetcher', () => {
         validator: {
           allowedCallers: ['spiffe://example.org/agent/research'],
           minTtlSeconds: 5,
-          allowedTrustDomains: domains,
+          ...(domains ? { allowedTrustDomains: domains } : {}),
+          ...(federated ? { federatedTrustDomains: federated } : {}),
         },
         transport: { mode: 'stdio-identity-only' },
       });

@@ -56,7 +56,15 @@ export class McpSpiffeBridgeImpl implements McpSpiffeBridge {
 
     const mtls =
       options.transport.mode === 'mtls-server'
-        ? new MtlsTransportServer({ fetcher, validator, audit, transport: options.transport })
+        ? new MtlsTransportServer({
+            fetcher,
+            validator,
+            audit,
+            transport: options.transport,
+            ...(options.validator.federatedTrustDomains
+              ? { federatedTrustDomains: options.validator.federatedTrustDomains }
+              : {}),
+          })
         : null;
 
     return new McpSpiffeBridgeImpl(options, fetcher, validator, audit, mtls);
@@ -91,10 +99,18 @@ export class McpSpiffeBridgeImpl implements McpSpiffeBridge {
     try {
       if (this.fetcher instanceof WorkloadApiSvidFetcher) this.fetcher.start();
       const own = (await this.fetcher.getX509Svid()).spiffeId.trustDomain;
-      const foreign = (this.options.validator.allowedTrustDomains ?? []).filter((td) => td !== own);
-      if (foreign.length > 0) {
+      const federated = new Set<string>(this.options.validator.federatedTrustDomains ?? []);
+      if (federated.has(own)) {
         throw new ConfigInvalidError(
-          `federation is not supported: allowedTrustDomains may only name the local trust domain ${own}, got ${foreign.join(', ')}`,
+          `federatedTrustDomains must not name the local trust domain ${own}`,
+        );
+      }
+      const unknown = (this.options.validator.allowedTrustDomains ?? []).filter(
+        (td) => td !== own && !federated.has(td),
+      );
+      if (unknown.length > 0) {
+        throw new ConfigInvalidError(
+          `allowedTrustDomains may only name the local trust domain ${own} or federatedTrustDomains entries, got ${unknown.join(', ')}`,
         );
       }
       if (this.stopped) throw new ConfigInvalidError('bridge stopped during startup');

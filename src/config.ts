@@ -42,6 +42,13 @@ const validatorSchema = z.object({
   }),
   minTtlSeconds: z.number().int().nonnegative(),
   allowedTrustDomains: z.array(z.string().min(1)).optional(),
+  federatedTrustDomains: z
+    .array(
+      z.string().regex(/^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/, {
+        message: 'must be a bare trust domain name such as `partner.example.org`',
+      }),
+    )
+    .optional(),
 });
 
 const transportSchema = z.object({

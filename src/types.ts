@@ -146,9 +146,15 @@ export interface SvidFetcher {
 export interface SvidValidator {
   /**
    * Validate a peer-presented certificate against the current trust bundle
-   * and configured allowlist. `now` override is for tests.
+   * and configured allowlist. `now` override is for tests. `peerChainDer`
+   * holds the issuers presented or verified by TLS, leaf excluded; it is
+   * required to accept federated peers.
    */
-  validate(peerCertDer: Uint8Array, now?: Date): Promise<ValidationResult>;
+  validate(
+    peerCertDer: Uint8Array,
+    now?: Date,
+    peerChainDer?: readonly Uint8Array[],
+  ): Promise<ValidationResult>;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -207,10 +213,18 @@ export interface ValidatorOptions {
   /** Reject SVIDs whose remaining lifetime is below this bound. */
   readonly minTtlSeconds: number;
   /**
-   * Optional pin of the local trust domain. Federation is unsupported: naming
-   * any other trust domain makes `start()` fail with `ConfigInvalidError`.
+   * Optional pin of the accepted trust domains. Each entry must be the local
+   * trust domain or listed in `federatedTrustDomains`, otherwise `start()`
+   * fails with `ConfigInvalidError`.
    */
   readonly allowedTrustDomains?: readonly TrustDomainString[];
+  /**
+   * Foreign trust domains to trust through Workload API federated bundles.
+   * Default none. A listed domain is trusted only while the agent supplies
+   * its bundle, and a peer must chain to the bundle of the trust domain in
+   * its own SPIFFE ID. Callers still need a matching `allowedCallers` entry.
+   */
+  readonly federatedTrustDomains?: readonly TrustDomainString[];
 }
 
 /**

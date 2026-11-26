@@ -14,6 +14,7 @@ import type {
   TrustDomainString,
   ValidationResult,
   ValidatorOptions,
+  X509Svid,
 } from '../types.js';
 
 /**
@@ -23,7 +24,9 @@ import type {
  *   1. Cert parses.
  *   2. Subject Alternative Name contains exactly one `URI:spiffe://…` entry.
  *   3. SPIFFE ID parses per the SPIFFE spec.
- *   4. Trust domain is the local fetcher's own domain (federation is unsupported).
+ *   4. Trust domain is the local domain or a configured federated domain whose
+ *      bundle is currently available. With federation configured, the peer
+ *      chain must lead to the bundle of the peer's own trust domain.
  *   5. Remaining TTL is >= `minTtlSeconds` and not yet expired / not yet valid.
  *   6. SPIFFE ID matches at least one `allowedCallers` entry.
  *
@@ -38,7 +41,11 @@ export class SpiffeValidator implements SvidValidator {
     private readonly ownFetcher: SvidFetcher,
   ) {}
 
-  async validate(peerCertDer: Uint8Array, now: Date = new Date()): Promise<ValidationResult> {
+  async validate(
+    peerCertDer: Uint8Array,
+    now: Date = new Date(),
+    peerChainDer: readonly Uint8Array[] = [],
+  ): Promise<ValidationResult> {
     let cert: X509Certificate;
     try {
       cert = new X509Certificate(Buffer.from(peerCertDer));
@@ -62,7 +69,8 @@ export class SpiffeValidator implements SvidValidator {
     }
 
     // Trust domain check
-    const allowedTds = await this.allowedTrustDomains();
+    const own = await this.ownFetcher.getX509Svid();
+    const allowedTds = this.allowedTrustDomains(own);
     if (!allowedTds.has(parsedId.trustDomain)) {
       return fail(
         new TrustDomainMismatchError(
@@ -70,6 +78,20 @@ export class SpiffeValidator implements SvidValidator {
           parsedId.full,
         ),
       );
+    }
+    if ((this.options.federatedTrustDomains?.length ?? 0) > 0) {
+      const anchors =
+        parsedId.trustDomain === own.spiffeId.trustDomain
+          ? own.trustBundle
+          : (own.federatedBundles?.get(parsedId.trustDomain) ?? []);
+      if (!chainsToAnchors(cert, peerChainDer, anchors)) {
+        return fail(
+          new TrustDomainMismatchError(
+            `peer chain does not lead to the trust bundle of ${parsedId.trustDomain}`,
+            parsedId.full,
+          ),
+        );
+      }
     }
 
     // Validity window
@@ -119,12 +141,18 @@ export class SpiffeValidator implements SvidValidator {
     };
   }
 
-  // Federation is unsupported: only the local trust domain can ever be accepted.
-  private async allowedTrustDomains(): Promise<ReadonlySet<TrustDomainString>> {
-    const own = (await this.ownFetcher.getX509Svid()).spiffeId.trustDomain;
+  /** Local domain plus configured federated domains with a current bundle, narrowed by any pin. */
+  private allowedTrustDomains(own: X509Svid): ReadonlySet<TrustDomainString> {
+    const local = own.spiffeId.trustDomain;
+    const candidates = [
+      local,
+      ...(this.options.federatedTrustDomains ?? []).filter(
+        (td) => td !== local && (own.federatedBundles?.get(td)?.length ?? 0) > 0,
+      ),
+    ];
     const pinned = this.options.allowedTrustDomains;
-    if (pinned && pinned.length > 0 && !pinned.includes(own)) return new Set();
-    return new Set([own]);
+    if (!pinned || pinned.length === 0) return new Set(candidates);
+    return new Set(candidates.filter((td) => pinned.includes(td)));
   }
 }
 
@@ -142,6 +170,50 @@ function extractSpiffeUriFromSan(san: string | undefined): string | null {
   const spiffeUris = uris.filter((u) => u.startsWith('spiffe://'));
   if (spiffeUris.length !== 1) return null;
   return spiffeUris[0] ?? null;
+}
+
+/**
+ * True when `leaf` reaches one of `anchors` through signature-checked issuers
+ * from `chain`. TLS has already validated the path against the combined trust
+ * store; this binds the path to one trust domain's bundle.
+ */
+function chainsToAnchors(
+  leaf: X509Certificate,
+  chain: readonly Uint8Array[],
+  anchors: readonly Uint8Array[],
+): boolean {
+  const roots = parseAll(anchors);
+  const issuers = parseAll(chain).filter((c) => c.ca);
+  const used = new Set<string>();
+  let current = leaf;
+  for (let depth = 0; depth < 10; depth++) {
+    if (roots.some((r) => r.raw.equals(current.raw) || issuedBy(current, r))) return true;
+    const next = issuers.find((i) => !used.has(i.fingerprint256) && issuedBy(current, i));
+    if (!next) return false;
+    used.add(next.fingerprint256);
+    current = next;
+  }
+  return false;
+}
+
+function issuedBy(cert: X509Certificate, issuer: X509Certificate): boolean {
+  try {
+    return cert.checkIssued(issuer) && cert.verify(issuer.publicKey);
+  } catch {
+    return false;
+  }
+}
+
+function parseAll(ders: readonly Uint8Array[]): X509Certificate[] {
+  const out: X509Certificate[] = [];
+  for (const der of ders) {
+    try {
+      out.push(new X509Certificate(Buffer.from(der)));
+    } catch {
+      /* An unparsable certificate cannot anchor or extend a chain. */
+    }
+  }
+  return out;
 }
 
 function fail(
