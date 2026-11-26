@@ -529,4 +529,41 @@ describe('root rotation and established connection policy', () => {
       await transport.stop();
     }
   });
+
+  it('refuses the request with 503 when the audit sink rejects', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const intruder = await ca.issue('spiffe://example.org/agent/intruder');
+    const port = await freePort();
+    const fetcher: SvidFetcher = {
+      getX509Svid: async () => own,
+      watchSvids: () => () => {},
+      close: async () => {},
+    };
+    const audit = { log: vi.fn(async () => Promise.reject(new Error('disk full'))) };
+    const handler = vi.fn((_req: unknown, res: import('node:http').ServerResponse) => {
+      res.end('served');
+    });
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit,
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    transport.setAuthorizedHandler(handler);
+    await transport.start();
+    try {
+      expect(await request(port, own, peer)).toEqual({
+        status: 503,
+        body: '{"error":"service_unavailable"}',
+      });
+      expect((await request(port, own, intruder)).status).toBe(503);
+      expect(handler).not.toHaveBeenCalled();
+      audit.log.mockResolvedValue(undefined);
+      expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
+    } finally {
+      await transport.stop();
+    }
+  });
 });

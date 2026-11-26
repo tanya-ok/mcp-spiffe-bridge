@@ -119,7 +119,11 @@ export class McpSpiffeBridgeImpl implements McpSpiffeBridge {
     try {
       await this.mtlsServer?.stop();
     } finally {
-      await this.fetcher.close();
+      try {
+        await this.fetcher.close();
+      } finally {
+        await this.audit.close?.();
+      }
     }
   }
 

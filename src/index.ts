@@ -1,10 +1,12 @@
 // ─── Public API: factory + types ────────────────────────────────────────
 
+export { FileAuditLogger, type FileAuditLoggerOptions } from './audit/file-sink.js';
 export { StdoutJsonAuditLogger } from './audit/logger.js';
 export { createMcpSpiffeBridge, McpSpiffeBridgeImpl } from './bridge.js';
 export { validateBridgeOptions } from './config.js';
 // ─── Errors ─────────────────────────────────────────────────────────────
 export {
+  AuditDeliveryError,
   ConfigInvalidError,
   isAuthError,
   isSpiffeBridgeError,

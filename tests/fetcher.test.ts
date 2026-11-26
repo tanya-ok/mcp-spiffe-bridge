@@ -251,6 +251,18 @@ describe('WorkloadApiSvidFetcher', () => {
     await bridge.stop();
   });
 
+  it('closes the audit logger on stop', async () => {
+    const logger = { log: vi.fn(), close: vi.fn(async () => {}) };
+    const bridge = createMcpSpiffeBridge({
+      workloadApi: { socketPath: '/tmp/fake.sock', rpcTimeoutMs: 20 },
+      validator: { allowedCallers: ['spiffe://example.org/agent/research'], minTtlSeconds: 5 },
+      transport: { mode: 'stdio-identity-only' },
+      audit: { logger },
+    });
+    await bridge.stop();
+    expect(logger.close).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     [['example.org'], true],
     [['example.org', 'partner.example.net'], false],

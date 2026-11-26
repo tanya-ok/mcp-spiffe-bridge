@@ -78,7 +78,8 @@ export type SpiffeBridgeErrorCode =
   | 'WORKLOAD_API_CONNECTION_FAILED'
   | 'WORKLOAD_API_TIMEOUT'
   | 'CONFIG_INVALID'
-  | 'TRANSPORT_ERROR';
+  | 'TRANSPORT_ERROR'
+  | 'AUDIT_DELIVERY_FAILED';
 
 /** Minimal shape every SpiffeBridgeError instance satisfies. */
 export interface SpiffeBridgeErrorShape {
@@ -166,8 +167,14 @@ export interface SpiffeAuditEvent {
   readonly denial_reason: string | null;
 }
 
+/**
+ * Audit sink. A rejected or throwing `log()` for an authentication event
+ * refuses that request (fail closed). `close()`, when present, is awaited by
+ * `McpSpiffeBridge.stop()` after the listener stops.
+ */
 export interface AuditLogger {
   log(event: SpiffeAuditEvent): void | Promise<void>;
+  close?(): Promise<void>;
 }
 
 // ─────────────────────────────────────────────────────────────────────
