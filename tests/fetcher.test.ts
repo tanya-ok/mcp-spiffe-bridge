@@ -315,8 +315,10 @@ describe('WorkloadApiSvidFetcher', () => {
       transport: { mode: 'stdio-identity-only' },
       audit: { logger },
     });
+    expect(bridge.isReady()).toBe(false);
     await bridge.stop();
     expect(logger.close).toHaveBeenCalledTimes(1);
+    expect(bridge.isReady()).toBe(false);
   });
 
   it.each([
@@ -344,6 +346,7 @@ describe('WorkloadApiSvidFetcher', () => {
       try {
         if (ok) await expect(bridge.start()).resolves.toBeUndefined();
         else await expect(bridge.start()).rejects.toThrow(ConfigInvalidError);
+        expect(bridge.isReady()).toBe(ok);
       } finally {
         await bridge.stop();
       }

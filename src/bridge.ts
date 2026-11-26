@@ -83,6 +83,12 @@ export class McpSpiffeBridgeImpl implements McpSpiffeBridge {
     this.mtlsServer.setAuthorizedHandler(handler);
   }
 
+  /** Readiness for probes: started, not stopped, and the listener (if any) is ready. */
+  isReady(): boolean {
+    if (!this.started || this.stopped) return false;
+    return this.mtlsServer ? this.mtlsServer.isReady() : true;
+  }
+
   async start(): Promise<void> {
     if (this.stopped) throw new ConfigInvalidError('bridge stopped; create a new instance');
     if (this.started) return;

@@ -304,6 +304,24 @@ async function serverFor(own: X509Svid, minTlsVersion?: 'TLSv1.2' | 'TLSv1.3') {
   return { fetcher, port, transport, audit };
 }
 
+describe('readiness', () => {
+  it('reports ready only while bound with usable credentials', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const { fetcher, transport } = await serverFor(own);
+    try {
+      expect(transport.isReady()).toBe(true);
+      fetcher.loseStream();
+      expect(transport.isReady()).toBe(false);
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      expect(transport.isReady()).toBe(true);
+    } finally {
+      await transport.stop();
+    }
+    expect(transport.isReady()).toBe(false);
+  });
+});
+
 describe('root rotation and established connection policy', () => {
   it.each(['TLSv1.2', 'TLSv1.3'] as const)(
     'uses overlapping roots and rejects a removed root with %s',

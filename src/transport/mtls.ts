@@ -73,6 +73,14 @@ export class MtlsTransportServer {
     this.handler = handler;
   }
 
+  /**
+   * True while the listener is bound and holds usable credentials. Use it for
+   * readiness probes; it turns false on credential loss, failed rotation and stop.
+   */
+  isReady(): boolean {
+    return this.ready && this.server?.listening === true;
+  }
+
   async start(): Promise<void> {
     if (this.opts.transport.mode !== 'mtls-server') {
       throw new Error(
