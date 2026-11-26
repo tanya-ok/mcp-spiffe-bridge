@@ -1,56 +1,68 @@
 # Production readiness
 
 Gaps between the library and a dependency a team can run in production, as of
-2026-11-26 on branch `feat/production-readiness`. "Closed" means implemented and
-pinned by tests in this repository. It does not mean released.
+2026-11-26 on branch `feat/production-readiness`. "Closed" means implemented
+and pinned by tests in this repository; items marked "Bench" also passed on the
+real [SPIRE bench](spire-bench.md). It does not mean released.
 
 ## Summary
 
 | State | Count |
 |---|---|
-| Closed in code, tested | 9 |
-| Ready, needs the maintainer to run | 2 |
-| Open, needs the maintainer, infrastructure or a decision | 6 |
-| Boundaries by design | 2 |
+| Closed in code and tested | 24 |
+| Open, needs the maintainer | 6 |
+| Boundaries by design | 3 |
 
-The library is not declared production-ready until every open row is closed.
+The library is not declared production-ready while any open row remains. Every
+open row needs the maintainer's account, infrastructure or decision.
 
-## Gap table
+## Closed
 
-Severity: High blocks production use, Medium weakens operation or adoption, Low
-is polish. Needs: Code means no account, infrastructure or decision is required.
+| # | Gap | Severity | Evidence |
+|---|---|---|---|
+| 1 | Federation unsupported | High | `validator.federatedTrustDomains`; `tests/federation.test.ts`; Bench |
+| 2 | Chain binding depended on the TLS-chosen path and skipped validity (expired local intermediate re-certified by a federated CA authenticated a local ID; reproduced first) | High | Transport validates every candidate path against only the claimed domain's anchors with validity, CA and keyCertSign checks; `tests/path.test.ts`, `tests/path-attack.test.ts`; Bench |
+| 3 | Binding skipped when transport and validator options differed (reproduced first) | High | Binding runs in the transport for every request; `tests/path-attack.test.ts`; Bench |
+| 4 | Wildcard trust domain in caller matchers | Medium | Exact trust domain and a literal segment required; `tests/spiffe-id.test.ts` |
+| 5 | Reconnect budget ended after about 20 s | High | Unlimited by default with capped backoff and jitter; `tests/fetcher.test.ts`; Bench (agent stop and restart) |
+| 6 | Audit to stdout only, no durable delivery | High | `FileAuditLogger` with fsync and group commit; `tests/file-sink.test.ts`; Bench (mode 0600) |
+| 7 | Readiness ignored the audit sink and own SVID validity | High | `isReady()` covers both; `tests/mtls.test.ts`; Bench (credential loss) |
+| 8 | Audit sink failure latched until manual `reopen()` | High | Automatic reopen with backoff; `tests/file-sink.test.ts` |
+| 9 | Handshake denials shared the authenticated audit queue | High | Separate rate-limited channel, counted drops; `tests/mtls.test.ts`, `tests/file-sink.test.ts` |
+| 10 | Handshake and rotation audit failure policy undecided | Medium | Handshake: dropped and counted. Rotation: `audit.backgroundFailure`, default `fail-closed`; `tests/mtls.test.ts` |
+| 11 | fsync per event | Medium | Group commit, `groupCommitMs` default 5; acknowledged events are always on disk |
+| 12 | Audit file followed symlinks, kept loose modes and unlinked inodes | Low | `O_NOFOLLOW`, regular file, owner and 0600 checks, inode follow |
+| 13 | `reopen()` and writes could race | Low | All file operations serialized |
+| 14 | Rotation and the fixed cap cut every connection | Medium | `transport.rotation` (`drain` default), `transport.maxConnectionAgeMs`; `tests/mtls.test.ts`; Bench (stream across rotation, closed at the handshake credential's expiry) |
+| 15 | CRLs refused, then all-issuers only | Medium | `transport.crlScope`: `all-issuers` (default) or `per-trust-domain`; OpenSSL-generated CRLs in `tests/crl-scope.test.ts`. Marked experimental |
+| 16 | No metrics | Medium | `BridgeMetrics` hooks; `tests/mtls.test.ts`, `tests/fetcher.test.ts` |
+| 17 | Audit format not versioned or specified | Medium | `schema_version` 1 and [audit event contract](architecture/contracts/audit-event.md) |
+| 18 | MCP SDK range unbounded and untested | Medium | Peer `>=1.32.0 <2.0.0`, optional; `tests/mcp-sdk.test.ts` |
+| 19 | CommonJS declarations failed with TS1479 | High | `.d.cts` tree; `pnpm run check:package` |
+| 20 | Tarball contents unverified | Medium | `check:package` in CI |
+| 21 | Release job built with `id-token` and repacked on publish | Low | Build job without `id-token`; publish job uploads the checked tarball. Inactive |
+| 22 | Biome configuration broke `biome ci` | Medium | Migrated to the 2.6 schema |
+| 23 | No real SPIRE federation run | Medium | [SPIRE bench](spire-bench.md), 18 of 18 checks |
+| 24 | Installed-package verifier and strict docs build not rerun | Low | Both pass on 2026-11-26 ([publication readiness](publication-readiness.md)) |
 
-| # | Gap | Severity | Needs | State | Evidence or plan |
-|---|---|---|---|---|---|
-| 1 | Federation unsupported | High | Code | Closed | `validator.federatedTrustDomains` opt-in. Federated bundles join the TLS store only while supplied, each peer chain must reach the bundle of its own trust domain, and callers still need an allowlist entry. `tests/federation.test.ts` |
-| 2 | CRL snapshots refused | Medium | Code | Closed | CRLs load into the TLS context. Revoked peers, expired CRLs and issuers without a CRL fail the handshake, and revocation denials are audited. `tests/crl.test.ts` |
-| 3 | Audit to stdout only, no durable delivery | High | Code | Closed | `FileAuditLogger`: fsync before `log()` resolves, mode 0600, bounded queue, sticky failure until `reopen()`. A rejected authentication audit refuses the request with 503. `tests/file-sink.test.ts`, `tests/mtls.test.ts` |
-| 4 | MCP SDK range unbounded and untested | Medium | Code | Closed | Peer `>=1.32.0 <2.0.0`, optional because the library does not import the SDK. A real SDK client and server run behind the listener. `tests/mcp-sdk.test.ts` |
-| 5 | CommonJS type declarations failed with TS1479 | High | Code | Closed | Build writes a `.d.cts` tree. `pnpm run check:package` type checks CJS and ESM consumers |
-| 6 | Tarball contents unverified | Medium | Code | Closed | `check:package` enforces a file allowlist, secret patterns, export targets and runtime `require` and `import`. CI runs it |
-| 7 | No readiness signal | Medium | Code | Closed | `bridge.isReady()` and `MtlsTransportServer.isReady()` turn false on credential loss, failed rotation and stop |
-| 8 | Biome configuration broke `biome ci` after the 2.6 bump | Medium | Code | Closed | Migrated `biome.json` |
-| 9 | Lint warnings recorded on 2026-10-06 | Low | Code | Closed | `biome ci .` reports no warnings |
-| 10 | Provenance | Medium | Maintainer | Ready | `publishConfig.provenance` and `.github/workflows/release.yml`, not run. Needs npm trusted publishing for this repository and an `npm` environment with required reviewers |
-| 11 | Remote CI on this branch | Medium | Maintainer | Ready | Local checks pass. Needs a push and pull request to run `ci.yml`, including `check:package` |
-| 12 | Not published to npm | High | Maintainer | Open | Needs npm account, package name ownership and a tagged release through the release workflow |
-| 13 | Version 0 | Medium | Decision | Open | Stability notes for 0.1.0 are in `CHANGELOG.md`. Bumping the version and tagging is a release decision |
-| 14 | Shared SPIRE lab not rerun for federation and CRLs | Medium | Infrastructure | Open | Run the lab with two federated SPIRE trust domains. Confirm whether the deployed SPIRE agent ever sends CRLs; that was not verified |
-| 15 | Independent security review | High | Decision | Open | Review federation chain binding, CRL semantics and audit failure policy before a production claim |
-| 16 | Handshake denial and rotation audit are best effort | Low | Decision | Open | These events happen outside a request, so there is nothing to refuse; a failed write is reported on stderr. Decide whether a failed write should stop the listener |
-| 17 | Documentation site build not rerun | Low | Maintainer | Open | `zensical build --strict` needs the docs virtualenv; not run in this session |
-| - | Authentication only | - | - | By design | Per-tool authorization, user identity and OAuth stay in the consuming gateway |
-| - | `stdio-identity-only` does not authenticate | - | - | By design | stdio cannot carry TLS. Use `mtls-server` for authenticated callers |
+## Open, needs the maintainer
 
-## Operating notes
+| # | Gap | Severity | Needs | Plan |
+|---|---|---|---|---|
+| 25 | Not published to npm | High | npm account | Package name ownership and a release through `.github/workflows/release.yml` |
+| 26 | Provenance not exercised | Medium | npm account | Configure npm trusted publishing for the repository and an `npm` environment with required reviewers |
+| 27 | Version still 0.0.1 | Medium | Decision | Choose the first release version; `CHANGELOG.md` lists the intended API |
+| 28 | Independent security review of this revision | High | Decision | Review chain binding, CRL scopes, the audit failure policy and the drain rule |
+| 29 | Shared Kubernetes lab not rerun on this revision | Medium | Infrastructure | The lab belongs to the sibling `mcp-svid-auth` project and its VM; rerun it there |
+| 30 | Remote CI and private vulnerability reporting for the latest commits | Low | Maintainer | Push the branch and enable reporting in the repository settings |
 
-| Topic | Behavior |
+## Boundaries by design
+
+| Boundary | Why |
 |---|---|
-| Reconnect | Bounded by `workloadApi.reconnect`. After the budget is spent, `isReady()` stays false; restart the process or create a new bridge |
-| Audit file rotation | Rename the file, then call `FileAuditLogger.reopen()` |
-| Audit failure | Authentication events fail closed: the request gets 503. The sink stays failed until `reopen()` succeeds |
-| CRL semantics | When a snapshot carries any CRL, every issuer in a peer chain needs a current CRL (OpenSSL CRL check on the full chain). Snapshots without CRLs do not check revocation |
-| Federation | Off by default. A bundle withdrawn by the agent removes that domain at the next update and closes existing connections |
+| Authentication only | Per-tool authorization, user identity and OAuth stay in the consuming gateway |
+| `stdio-identity-only` does not authenticate | stdio cannot carry TLS; use `mtls-server` for authenticated callers |
+| Node.js 26 or newer | `engines.node >=26` is a deliberate support decision of the maintainer |
 
 ## Verify locally
 
@@ -61,4 +73,5 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm run check:package
+pnpm run bench:spire
 ```
