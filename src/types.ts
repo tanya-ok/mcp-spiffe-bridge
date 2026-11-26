@@ -274,8 +274,21 @@ export type TransportMode = 'mtls-server' | 'stdio-identity-only';
 /** Lowest TLS version the mTLS listener accepts. */
 export type MinTlsVersion = 'TLSv1.2' | 'TLSv1.3';
 
+/**
+ * How Workload API CRLs are enforced.
+ *  - `all-issuers` (default): OpenSSL checks revocation at the handshake. When
+ *    any CRL is present, every issuer in every peer chain needs a current CRL,
+ *    so federated callers are refused unless their domain also publishes CRLs.
+ *  - `per-trust-domain`: the listener checks revocation per request and only
+ *    for trust domains that publish CRLs; within such a domain every issuer on
+ *    the path needs a current CRL. Experimental.
+ */
+export type CrlScope = 'all-issuers' | 'per-trust-domain';
+
 export interface TransportOptions {
   readonly mode: TransportMode;
+  /** Default `all-issuers`. */
+  readonly crlScope?: CrlScope;
   /** Default `TLSv1.3`. Set `TLSv1.2` only for peers that cannot negotiate TLS 1.3. */
   readonly minTlsVersion?: MinTlsVersion;
   readonly sse?: {

@@ -58,6 +58,7 @@ const validatorSchema = z.object({
 const transportSchema = z.object({
   mode: z.enum(['mtls-server', 'stdio-identity-only']),
   minTlsVersion: z.enum(['TLSv1.2', 'TLSv1.3']).optional(),
+  crlScope: z.enum(['all-issuers', 'per-trust-domain']).optional(),
   sse: z
     .object({
       host: z.string().min(1).optional(),

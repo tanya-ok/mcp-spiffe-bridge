@@ -50,6 +50,7 @@ export type {
   AuthError,
   BridgeOptions,
   CallerMatcher,
+  CrlScope,
   DegradeMode,
   DegradeOptions,
   McpSpiffeBridge,

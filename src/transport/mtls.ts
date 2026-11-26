@@ -1,4 +1,4 @@
-import { constants, randomBytes, randomUUID, type X509Certificate } from 'node:crypto';
+import { constants, randomBytes, randomUUID, X509Certificate } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as https from 'node:https';
 import type { Duplex } from 'node:stream';
@@ -9,6 +9,7 @@ import {
   buildSvidRotatedEvent,
 } from '../audit/logger.js';
 import { parseSpiffeId } from '../spiffe-id.js';
+import { checkRevocation } from '../svid/crl.js';
 import { verifyPathToAnchors } from '../svid/path.js';
 import { anchorsFor, extractSpiffeUriFromSan } from '../svid/validator.js';
 import type {
@@ -78,8 +79,11 @@ export class MtlsTransportServer {
 
   private readonly federated: readonly TrustDomainString[];
 
+  private readonly tlsCrls: boolean;
+
   constructor(private readonly opts: MtlsTransportServerOptions) {
     this.federated = opts.federatedTrustDomains ?? [];
+    this.tlsCrls = (opts.transport.crlScope ?? 'all-issuers') === 'all-issuers';
   }
 
   setAuthorizedHandler(handler: AuthorizedRequestHandler): void {
@@ -133,7 +137,7 @@ export class MtlsTransportServer {
     let initialSvid = await this.opts.fetcher.getX509Svid();
     this.current = initialSvid;
     const minVersion = this.opts.transport.minTlsVersion ?? 'TLSv1.3';
-    const initialOpts = svidToHttpsOptions(initialSvid, minVersion, this.federated);
+    const initialOpts = svidToHttpsOptions(initialSvid, minVersion, this.federated, this.tlsCrls);
 
     this.server = https.createServer(initialOpts, (req, res) => {
       void this.handleRequest(req, res).catch(() => {
@@ -226,7 +230,7 @@ export class MtlsTransportServer {
       this.disconnect();
       try {
         this.server?.setSecureContext(
-          svidToSecureContextOptions(newSvid, minVersion, this.federated),
+          svidToSecureContextOptions(newSvid, minVersion, this.federated, this.tlsCrls),
         );
         this.server?.setTicketKeys(randomBytes(48));
         initialSvid = newSvid;
@@ -406,12 +410,21 @@ export class MtlsTransportServer {
       };
     }
     const anchors = anchorsFor(own, id.trustDomain, this.federated);
-    if (verifyPathToAnchors(peerDer, issuers, anchors, new Date())) return null;
-    return {
-      code: 'TRUST_DOMAIN_MISMATCH',
-      message: `peer chain does not lead to the trust bundle of ${id.trustDomain}`,
-      observedSpiffeId: id.full,
-    };
+    const now = new Date();
+    const path = verifyPathToAnchors(peerDer, issuers, anchors, now);
+    if (!path) {
+      return {
+        code: 'TRUST_DOMAIN_MISMATCH',
+        message: `peer chain does not lead to the trust bundle of ${id.trustDomain}`,
+        observedSpiffeId: id.full,
+      };
+    }
+    if (!this.tlsCrls && own.crls?.length) {
+      const anchorCerts = anchors.map((a) => new X509Certificate(Buffer.from(a)));
+      const reason = checkRevocation(path, anchorCerts, own.crls, now);
+      if (reason) return { code: 'SVID_INVALID', message: reason, observedSpiffeId: id.full };
+    }
+    return null;
   }
 
   private deny(res: ServerResponse): void {
@@ -431,9 +444,10 @@ function svidToHttpsOptions(
   svid: X509Svid,
   minVersion: MinTlsVersion,
   federated: readonly TrustDomainString[],
+  tlsCrls: boolean,
 ): https.ServerOptions {
   return {
-    ...svidToSecureContextOptions(svid, minVersion, federated),
+    ...svidToSecureContextOptions(svid, minVersion, federated, tlsCrls),
     minVersion,
     secureOptions: constants.SSL_OP_NO_TICKET,
     requestCert: true,
@@ -445,6 +459,7 @@ function svidToSecureContextOptions(
   svid: X509Svid,
   minVersion: MinTlsVersion,
   federated: readonly TrustDomainString[],
+  tlsCrls: boolean,
 ): tls.SecureContextOptions {
   const certPem = svid.certChain.map(derToPem.bind(null, 'CERTIFICATE')).join('\n');
   const keyPem = derToPem('PRIVATE KEY', svid.privateKey);
@@ -458,7 +473,9 @@ function svidToSecureContextOptions(
     cert: certPem,
     key: keyPem,
     ca: caPem,
-    ...(svid.crls?.length ? { crl: svid.crls.map(derToPem.bind(null, 'X509 CRL')) } : {}),
+    ...(tlsCrls && svid.crls?.length
+      ? { crl: svid.crls.map(derToPem.bind(null, 'X509 CRL')) }
+      : {}),
     minVersion,
     secureOptions: constants.SSL_OP_NO_TICKET,
   };
