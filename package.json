@@ -57,7 +57,12 @@
     "format": "biome format --write src tests examples scripts"
   },
   "peerDependencies": {
-    "@modelcontextprotocol/sdk": ">=1.0.0 <2.0.0"
+    "@modelcontextprotocol/sdk": ">=1.32.0 <2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    }
   },
   "dependencies": {
     "spiffe": "^0.5.1",
