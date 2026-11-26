@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { matchesAllowlist, parseSpiffeId, spiffeIdEquals } from '../src/spiffe-id.js';
+import {
+  isValidCallerMatcher,
+  matchesAllowlist,
+  parseSpiffeId,
+  spiffeIdEquals,
+} from '../src/spiffe-id.js';
 import type { SpiffeId } from '../src/types.js';
 
 function mustParse(input: string): SpiffeId {
@@ -84,5 +89,32 @@ describe('matchesAllowlist', () => {
         'spiffe://prod.example.org/svc/*',
       ]),
     ).toBe(true);
+  });
+});
+
+describe('caller matcher rules', () => {
+  const id = (s: string) => {
+    const parsed = parseSpiffeId(s);
+    if (!parsed) throw new Error('test setup');
+    return parsed;
+  };
+  it.each([
+    ['spiffe://example.org/agent/*', true],
+    ['spiffe://example.org/agent/**', true],
+    ['spiffe://example.org/agent/research', true],
+    ['spiffe://*/agent/research', false],
+    ['spiffe://*.example.org/agent/*', false],
+    ['spiffe://*/**', false],
+    ['spiffe://example.org/**', false],
+    ['spiffe://example.org/*', false],
+    ['spiffe://example.org/*/**', false],
+  ])('%s valid=%s', (matcher, ok) => {
+    expect(isValidCallerMatcher(matcher)).toBe(ok);
+  });
+  it('never matches through an invalid matcher at runtime', () => {
+    expect(matchesAllowlist(id('spiffe://partner.example.net/a/b'), ['spiffe://*/**'])).toBe(false);
+    expect(matchesAllowlist(id('spiffe://example.org/a/b'), ['spiffe://example.org/**'])).toBe(
+      false,
+    );
   });
 });

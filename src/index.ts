@@ -21,7 +21,12 @@ export {
   WorkloadApiConnectionError,
   WorkloadApiTimeoutError,
 } from './errors.js';
-export { matchesAllowlist, parseSpiffeId, spiffeIdEquals } from './spiffe-id.js';
+export {
+  isValidCallerMatcher,
+  matchesAllowlist,
+  parseSpiffeId,
+  spiffeIdEquals,
+} from './spiffe-id.js';
 export { WorkloadApiSvidFetcher } from './svid/fetcher.js';
 export { SpiffeValidator } from './svid/validator.js';
 export {

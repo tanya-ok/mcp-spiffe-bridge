@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ConfigInvalidError } from './errors.js';
+import { isValidCallerMatcher } from './spiffe-id.js';
 import type { BridgeOptions } from './types.js';
 
 // A caller-matcher is a SPIFFE-ID or glob of one. We don't fully parse it
@@ -8,8 +9,11 @@ import type { BridgeOptions } from './types.js';
 const callerMatcherSchema = z
   .string()
   .min(1)
-  .regex(/^spiffe:\/\/[a-z0-9._*-]+(\/[A-Za-z0-9._~!$&'()*+,;=:@*-]+)*$/, {
-    message: 'must look like `spiffe://<trust-domain>/<path>` (wildcards `*` and `**` allowed)',
+  .regex(/^spiffe:\/\/[a-z0-9._-]+(\/[A-Za-z0-9._~!$&'()*+,;=:@*-]+)*$/, {
+    message: 'must look like `spiffe://<trust-domain>/<path>` with an exact trust domain',
+  })
+  .refine(isValidCallerMatcher, {
+    message: 'wildcards need at least one literal path segment',
   });
 
 const socketPathSchema = z
