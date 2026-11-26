@@ -46,6 +46,7 @@ export type {
   AuditBackgroundFailure,
   AuditLogger,
   AuditOptions,
+  AuditSinkStats,
   AuthError,
   BridgeOptions,
   CallerMatcher,

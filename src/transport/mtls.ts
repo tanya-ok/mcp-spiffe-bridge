@@ -71,6 +71,10 @@ export class MtlsTransportServer {
   private credentialEpoch = 0;
   private ready = false;
   private auditFailed = false;
+  private current: X509Svid | null = null;
+  private droppedHandshakeAudit = 0;
+  private handshakeTokens = HANDSHAKE_AUDIT_PER_SECOND;
+  private handshakeTokensAt = Date.now();
 
   private readonly federated: readonly TrustDomainString[];
 
@@ -87,7 +91,22 @@ export class MtlsTransportServer {
    * readiness probes; it turns false on credential loss, failed rotation and stop.
    */
   isReady(): boolean {
-    return this.ready && !this.auditFailed && this.server?.listening === true;
+    const now = Date.now();
+    const own = this.current;
+    return (
+      this.ready &&
+      !this.auditFailed &&
+      this.server?.listening === true &&
+      this.opts.audit.healthy?.() !== false &&
+      own !== null &&
+      own.notBefore.getTime() <= now &&
+      now < own.notAfter.getTime()
+    );
+  }
+
+  /** Counters for audit events from unauthenticated peers. */
+  stats(): { readonly droppedHandshakeAudit: number } {
+    return { droppedHandshakeAudit: this.droppedHandshakeAudit };
   }
 
   /** True after a background audit write failed under the `fail-closed` policy. */
@@ -112,6 +131,7 @@ export class MtlsTransportServer {
     }
 
     let initialSvid = await this.opts.fetcher.getX509Svid();
+    this.current = initialSvid;
     const minVersion = this.opts.transport.minTlsVersion ?? 'TLSv1.3';
     const initialOpts = svidToHttpsOptions(initialSvid, minVersion, this.federated);
 
@@ -156,13 +176,11 @@ export class MtlsTransportServer {
             : certificateErrors.has(code)
               ? 'TLS certificate verification failed'
               : 'TLS handshake failed';
-      this.backgroundAudit(
-        () =>
-          buildAuthFailureEvent(
-            { code: 'SVID_INVALID', message, observedSpiffeId: null },
-            { requestId: randomUUID() },
-          ),
-        'TLS denial',
+      this.auditHandshakeDenial(
+        buildAuthFailureEvent(
+          { code: 'SVID_INVALID', message, observedSpiffeId: null },
+          { requestId: randomUUID() },
+        ),
       );
     });
     this.ready = true;
@@ -212,6 +230,7 @@ export class MtlsTransportServer {
         );
         this.server?.setTicketKeys(randomBytes(48));
         initialSvid = newSvid;
+        this.current = newSvid;
         this.ready = this.server !== null;
       } catch {
         process.stderr.write('bridge: rotated TLS context unavailable\n');
@@ -250,6 +269,7 @@ export class MtlsTransportServer {
     this.unwatchAvailability?.();
     this.unwatchAvailability = null;
     this.ready = false;
+    this.current = null;
     this.disconnect();
     if (!this.server) return;
     const srv = this.server;
@@ -264,6 +284,39 @@ export class MtlsTransportServer {
   }
 
   // ─── internals ─────────────────────────────────────────────────────────
+
+  /**
+   * Handshake denials come from unauthenticated peers, so they use a separate,
+   * rate-limited channel that never blocks or fails authenticated audit. Drops
+   * are counted in `stats()`.
+   */
+  private auditHandshakeDenial(event: SpiffeAuditEvent): void {
+    const audit = this.opts.audit;
+    if (audit.logUnauthenticated) {
+      try {
+        audit.logUnauthenticated(event);
+      } catch {
+        this.droppedHandshakeAudit++;
+      }
+      return;
+    }
+    const now = Date.now();
+    this.handshakeTokens = Math.min(
+      HANDSHAKE_AUDIT_PER_SECOND,
+      this.handshakeTokens + ((now - this.handshakeTokensAt) / 1000) * HANDSHAKE_AUDIT_PER_SECOND,
+    );
+    this.handshakeTokensAt = now;
+    if (this.handshakeTokens < 1) {
+      this.droppedHandshakeAudit++;
+      return;
+    }
+    this.handshakeTokens -= 1;
+    void Promise.resolve()
+      .then(() => audit.log(event))
+      .catch(() => {
+        this.droppedHandshakeAudit++;
+      });
+  }
 
   /**
    * Audit an event that has no request to refuse. Under `fail-closed` a failed
@@ -410,6 +463,8 @@ function svidToSecureContextOptions(
     secureOptions: constants.SSL_OP_NO_TICKET,
   };
 }
+
+const HANDSHAKE_AUDIT_PER_SECOND = 20;
 
 /** Issuer certificates of the verified peer chain, leaf excluded. */
 function peerIssuers(socket: tls.TLSSocket): Uint8Array[] {

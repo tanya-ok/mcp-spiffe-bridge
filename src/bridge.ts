@@ -88,7 +88,7 @@ export class McpSpiffeBridgeImpl implements McpSpiffeBridge {
 
   /** Readiness for probes: started, not stopped, and the listener (if any) is ready. */
   isReady(): boolean {
-    if (!this.started || this.stopped) return false;
+    if (!this.started || this.stopped || this.audit.healthy?.() === false) return false;
     return this.mtlsServer ? this.mtlsServer.isReady() : true;
   }
 

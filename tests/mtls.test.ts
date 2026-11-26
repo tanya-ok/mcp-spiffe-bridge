@@ -1,8 +1,12 @@
 import { randomUUID, webcrypto } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as https from 'node:https';
 import * as net from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as x509 from '@peculiar/x509';
 import { describe, expect, it, vi } from 'vitest';
+import { FileAuditLogger } from '../src/audit/file-sink.js';
 import { parseSpiffeId } from '../src/spiffe-id.js';
 import { SpiffeValidator } from '../src/svid/validator.js';
 import { getCallerIdentity } from '../src/transport/context.js';
@@ -585,50 +589,107 @@ describe('root rotation and established connection policy', () => {
     }
   });
 
-  it.each(['fail-closed', undefined] as const)(
-    'stops serving after a failed handshake-denial audit with policy %s',
-    async (policy) => {
-      const ca = await certificates();
-      const own = await ca.issue('spiffe://example.org/mcp/fhir');
-      const peer = await ca.issue(research);
-      const foreign = await (await certificates()).issue(research);
-      const port = await freePort();
-      const fetcher: SvidFetcher = {
-        getX509Svid: async () => own,
-        watchSvids: () => () => {},
-        close: async () => {},
-      };
-      const audit = {
-        log: vi.fn(async (event: { event_type: string }) => {
-          if (event.event_type === 'auth_failure') throw new Error('disk full');
-        }),
-      };
-      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-      const transport = new MtlsTransportServer({
-        fetcher,
-        validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
-        audit,
-        transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
-        ...(policy ? { auditBackgroundFailure: policy } : {}),
-      });
-      transport.setAuthorizedHandler((_req, res) => res.end('served'));
-      await transport.start();
-      try {
-        expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
-        await expect(request(port, own, foreign)).rejects.toThrow();
-        await vi.waitFor(() => expect(transport.isAuditFailed()).toBe(true));
-        expect(stderr).toHaveBeenCalledWith('bridge: TLS denial audit unavailable\n');
-        expect(transport.isReady()).toBe(false);
-        await expect(request(port, own, peer)).rejects.toThrow();
-        transport.clearAuditFailure();
-        expect(transport.isReady()).toBe(true);
-        expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
-      } finally {
-        stderr.mockRestore();
-        await transport.stop();
-      }
-    },
-  );
+  it('keeps serving and counts drops when handshake-denial audit fails', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const foreign = await (await certificates()).issue(research);
+    const port = await freePort();
+    const fetcher: SvidFetcher = {
+      getX509Svid: async () => own,
+      watchSvids: () => () => {},
+      close: async () => {},
+    };
+    const audit = {
+      log: vi.fn(async (event: { event_type: string; caller_spiffe_id: string | null }) => {
+        if (event.event_type === 'auth_failure' && event.caller_spiffe_id === null) {
+          throw new Error('disk full');
+        }
+      }),
+    };
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit,
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    transport.setAuthorizedHandler((_req, res) => res.end('served'));
+    await transport.start();
+    try {
+      await expect(request(port, own, foreign)).rejects.toThrow();
+      await vi.waitFor(() => expect(transport.stats().droppedHandshakeAudit).toBe(1));
+      expect(transport.isReady()).toBe(true);
+      expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('keeps authenticated audit available during a handshake-denial flood', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const port = await freePort();
+    const dir = await mkdtemp(join(tmpdir(), 'bridge-flood-'));
+    const sink = new FileAuditLogger({
+      path: join(dir, 'audit.jsonl'),
+      maxQueue: 2,
+      unauthenticatedPerSecond: 3,
+      maxUnauthenticatedQueue: 2,
+    });
+    const fetcher: SvidFetcher = {
+      getX509Svid: async () => own,
+      watchSvids: () => () => {},
+      close: async () => {},
+    };
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit: sink,
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    transport.setAuthorizedHandler((_req, res) => res.end('served'));
+    await transport.start();
+    try {
+      await Promise.all(
+        Array.from({ length: 40 }, () => request(port, own).catch(() => undefined)),
+      );
+      expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
+      expect(sink.stats().droppedUnauthenticated).toBeGreaterThan(30);
+      expect(transport.isReady()).toBe(true);
+    } finally {
+      await transport.stop();
+      await sink.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports not ready while the audit sink is unhealthy or the own SVID expired', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const port = await freePort();
+    let healthy = true;
+    const fetcher = new MutableFetcher(own);
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit: { log: vi.fn(), healthy: () => healthy },
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    await transport.start();
+    try {
+      expect(transport.isReady()).toBe(true);
+      healthy = false;
+      expect(transport.isReady()).toBe(false);
+      healthy = true;
+      const now = vi.spyOn(Date, 'now').mockReturnValue(own.notAfter.getTime() + 1);
+      expect(transport.isReady()).toBe(false);
+      now.mockRestore();
+      expect(transport.isReady()).toBe(true);
+    } finally {
+      await transport.stop();
+    }
+  });
 
   it('keeps serving after a failed background audit with policy report', async () => {
     const ca = await certificates();

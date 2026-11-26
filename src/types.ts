@@ -184,7 +184,22 @@ export interface SpiffeAuditEvent {
  */
 export interface AuditLogger {
   log(event: SpiffeAuditEvent): void | Promise<void>;
+  /**
+   * Optional channel for events from unauthenticated peers (TLS handshake
+   * denials). Must not throw or block; the sink may drop and count events.
+   * Without it, the listener rate-limits these events itself and calls `log`.
+   */
+  logUnauthenticated?(event: SpiffeAuditEvent): void;
+  /** Optional health; false makes `isReady()` false. */
+  healthy?(): boolean;
   close?(): Promise<void>;
+}
+
+export interface AuditSinkStats {
+  readonly healthy: boolean;
+  readonly pending: number;
+  readonly droppedUnauthenticated: number;
+  readonly written: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────
