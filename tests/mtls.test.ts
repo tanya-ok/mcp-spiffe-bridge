@@ -584,4 +584,111 @@ describe('root rotation and established connection policy', () => {
       await transport.stop();
     }
   });
+
+  it.each(['fail-closed', undefined] as const)(
+    'stops serving after a failed handshake-denial audit with policy %s',
+    async (policy) => {
+      const ca = await certificates();
+      const own = await ca.issue('spiffe://example.org/mcp/fhir');
+      const peer = await ca.issue(research);
+      const foreign = await (await certificates()).issue(research);
+      const port = await freePort();
+      const fetcher: SvidFetcher = {
+        getX509Svid: async () => own,
+        watchSvids: () => () => {},
+        close: async () => {},
+      };
+      const audit = {
+        log: vi.fn(async (event: { event_type: string }) => {
+          if (event.event_type === 'auth_failure') throw new Error('disk full');
+        }),
+      };
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const transport = new MtlsTransportServer({
+        fetcher,
+        validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+        audit,
+        transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+        ...(policy ? { auditBackgroundFailure: policy } : {}),
+      });
+      transport.setAuthorizedHandler((_req, res) => res.end('served'));
+      await transport.start();
+      try {
+        expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
+        await expect(request(port, own, foreign)).rejects.toThrow();
+        await vi.waitFor(() => expect(transport.isAuditFailed()).toBe(true));
+        expect(stderr).toHaveBeenCalledWith('bridge: TLS denial audit unavailable\n');
+        expect(transport.isReady()).toBe(false);
+        await expect(request(port, own, peer)).rejects.toThrow();
+        transport.clearAuditFailure();
+        expect(transport.isReady()).toBe(true);
+        expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
+      } finally {
+        stderr.mockRestore();
+        await transport.stop();
+      }
+    },
+  );
+
+  it('keeps serving after a failed background audit with policy report', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const fetcher = new MutableFetcher(own);
+    const port = await freePort();
+    const audit = {
+      log: vi.fn((event: { event_type: string }) => {
+        if (event.event_type === 'svid_rotated') throw new Error('sync failure');
+      }),
+    };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit,
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+      auditBackgroundFailure: 'report',
+    });
+    transport.setAuthorizedHandler((_req, res) => res.end('served'));
+    await transport.start();
+    try {
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      await vi.waitFor(() =>
+        expect(stderr).toHaveBeenCalledWith('bridge: rotation audit unavailable\n'),
+      );
+      expect(transport.isAuditFailed()).toBe(false);
+      expect(transport.isReady()).toBe(true);
+      expect(await request(port, fetcher.current, peer)).toEqual({ status: 200, body: 'served' });
+    } finally {
+      stderr.mockRestore();
+      await transport.stop();
+    }
+  });
+
+  it('fails closed on a synchronous rotation audit throw by default', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const fetcher = new MutableFetcher(own);
+    const port = await freePort();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit: {
+        log: (event) => {
+          if (event.event_type === 'svid_rotated') throw new Error('sync failure');
+        },
+      },
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    await transport.start();
+    try {
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      await vi.waitFor(() => expect(transport.isAuditFailed()).toBe(true));
+      expect(transport.isReady()).toBe(false);
+    } finally {
+      stderr.mockRestore();
+      await transport.stop();
+    }
+  });
 });

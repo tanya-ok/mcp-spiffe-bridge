@@ -9,8 +9,10 @@ import {
   buildSvidRotatedEvent,
 } from '../audit/logger.js';
 import type {
+  AuditBackgroundFailure,
   AuditLogger,
   MinTlsVersion,
+  SpiffeAuditEvent,
   SvidFetcher,
   SvidValidator,
   TransportOptions,
@@ -37,6 +39,8 @@ export interface MtlsTransportServerOptions {
   readonly transport: TransportOptions;
   /** Foreign trust domains whose federated bundles join the TLS trust store. */
   readonly federatedTrustDomains?: readonly TrustDomainString[];
+  /** What a failed handshake-denial or rotation audit does. Default `fail-closed`. */
+  readonly auditBackgroundFailure?: AuditBackgroundFailure;
 }
 
 /**
@@ -62,6 +66,7 @@ export class MtlsTransportServer {
   private readonly sockets = new Set<Duplex>();
   private credentialEpoch = 0;
   private ready = false;
+  private auditFailed = false;
 
   private readonly federated: readonly TrustDomainString[];
 
@@ -78,7 +83,17 @@ export class MtlsTransportServer {
    * readiness probes; it turns false on credential loss, failed rotation and stop.
    */
   isReady(): boolean {
-    return this.ready && this.server?.listening === true;
+    return this.ready && !this.auditFailed && this.server?.listening === true;
+  }
+
+  /** True after a background audit write failed under the `fail-closed` policy. */
+  isAuditFailed(): boolean {
+    return this.auditFailed;
+  }
+
+  /** Resume serving after a background audit failure, once the sink works again. */
+  clearAuditFailure(): void {
+    this.auditFailed = false;
   }
 
   async start(): Promise<void> {
@@ -137,22 +152,14 @@ export class MtlsTransportServer {
             : certificateErrors.has(code)
               ? 'TLS certificate verification failed'
               : 'TLS handshake failed';
-      void Promise.resolve()
-        .then(() =>
-          this.opts.audit.log(
-            buildAuthFailureEvent(
-              {
-                code: 'SVID_INVALID',
-                message,
-                observedSpiffeId: null,
-              },
-              { requestId: randomUUID() },
-            ),
+      this.backgroundAudit(
+        () =>
+          buildAuthFailureEvent(
+            { code: 'SVID_INVALID', message, observedSpiffeId: null },
+            { requestId: randomUUID() },
           ),
-        )
-        .catch(() => {
-          process.stderr.write('bridge: TLS denial audit unavailable\n');
-        });
+        'TLS denial',
+      );
     });
     this.ready = true;
     this.server.on('connection', (socket) => {
@@ -162,7 +169,7 @@ export class MtlsTransportServer {
       });
     });
     this.server.on('secureConnection', (socket) => {
-      if (socket.destroyed || !this.ready || socket.isSessionReused()) {
+      if (socket.destroyed || !this.ready || this.auditFailed || socket.isSessionReused()) {
         socket.destroy();
         return;
       }
@@ -206,11 +213,10 @@ export class MtlsTransportServer {
         process.stderr.write('bridge: rotated TLS context unavailable\n');
         return;
       }
-      void Promise.resolve(
-        this.opts.audit.log(buildSvidRotatedEvent(newSvid, { requestId: randomUUID() })),
-      ).catch(() => {
-        process.stderr.write('bridge: rotation audit unavailable\n');
-      });
+      this.backgroundAudit(
+        () => buildSvidRotatedEvent(newSvid, { requestId: randomUUID() }),
+        'rotation',
+      );
     });
 
     try {
@@ -255,6 +261,22 @@ export class MtlsTransportServer {
 
   // ─── internals ─────────────────────────────────────────────────────────
 
+  /**
+   * Audit an event that has no request to refuse. Under `fail-closed` a failed
+   * write stops the listener from serving until `clearAuditFailure()`.
+   */
+  private backgroundAudit(build: () => SpiffeAuditEvent, kind: string): void {
+    void Promise.resolve()
+      .then(() => this.opts.audit.log(build()))
+      .catch(() => {
+        process.stderr.write(`bridge: ${kind} audit unavailable\n`);
+        if ((this.opts.auditBackgroundFailure ?? 'fail-closed') === 'fail-closed') {
+          this.auditFailed = true;
+          this.disconnect();
+        }
+      });
+  }
+
   private disconnect(): void {
     this.credentialEpoch++;
     for (const socket of this.sockets) socket.destroy();
@@ -263,6 +285,7 @@ export class MtlsTransportServer {
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!this.ready) throw new Error('credential state unavailable');
+    if (this.auditFailed) throw new Error('audit unavailable');
     const epoch = this.credentialEpoch;
     await this.opts.fetcher.getX509Svid();
     const requestId = randomUUID();

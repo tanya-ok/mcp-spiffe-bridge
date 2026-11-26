@@ -44,6 +44,16 @@ describe('validateBridgeOptions', () => {
     else expect(() => validateBridgeOptions(input)).toThrow(ConfigInvalidError);
   });
 
+  it.each([
+    ['fail-closed', true],
+    ['report', true],
+    ['ignore', false],
+  ])('validates audit.backgroundFailure %s', (policy, ok) => {
+    const input = { ...validBase, audit: { backgroundFailure: policy } };
+    if (ok) expect(validateBridgeOptions(input).audit?.backgroundFailure).toBe(policy);
+    else expect(() => validateBridgeOptions(input)).toThrow(ConfigInvalidError);
+  });
+
   it('rejects malformed caller matcher', () => {
     const bad = {
       ...validBase,

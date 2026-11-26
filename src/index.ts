@@ -38,7 +38,9 @@ export {
 
 // ─── Types (type-only re-exports) ───────────────────────────────────────
 export type {
+  AuditBackgroundFailure,
   AuditLogger,
+  AuditOptions,
   AuthError,
   BridgeOptions,
   CallerMatcher,

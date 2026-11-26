@@ -266,11 +266,26 @@ export interface TransportOptions {
   };
 }
 
+/**
+ * Policy for audit events that have no request to refuse: TLS handshake
+ * denials and SVID rotation.
+ *  - `fail-closed`: a failed write closes connections, refuses new ones and
+ *    makes `isReady()` false until `clearAuditFailure()` is called.
+ *  - `report`: write a line to stderr and keep serving.
+ */
+export type AuditBackgroundFailure = 'fail-closed' | 'report';
+
+export interface AuditOptions {
+  readonly logger?: AuditLogger;
+  /** Default `fail-closed`. */
+  readonly backgroundFailure?: AuditBackgroundFailure;
+}
+
 export interface BridgeOptions {
   readonly workloadApi: WorkloadApiOptions;
   readonly validator: ValidatorOptions;
   readonly transport: TransportOptions;
-  readonly audit?: { readonly logger?: AuditLogger };
+  readonly audit?: AuditOptions;
   readonly degrade?: DegradeOptions;
 }
 

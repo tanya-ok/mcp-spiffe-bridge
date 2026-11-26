@@ -71,6 +71,7 @@ const degradeSchema = z.object({
 const auditSchema = z.object({
   // logger is a function/object, not JSON-serializable; we pass it through as unknown.
   logger: z.unknown().optional(),
+  backgroundFailure: z.enum(['fail-closed', 'report']).optional(),
 });
 
 const bridgeOptionsSchema = z.object({

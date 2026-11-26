@@ -64,6 +64,9 @@ export class McpSpiffeBridgeImpl implements McpSpiffeBridge {
             ...(options.validator.federatedTrustDomains
               ? { federatedTrustDomains: options.validator.federatedTrustDomains }
               : {}),
+            ...(options.audit?.backgroundFailure
+              ? { auditBackgroundFailure: options.audit.backgroundFailure }
+              : {}),
           })
         : null;
 
@@ -87,6 +90,11 @@ export class McpSpiffeBridgeImpl implements McpSpiffeBridge {
   isReady(): boolean {
     if (!this.started || this.stopped) return false;
     return this.mtlsServer ? this.mtlsServer.isReady() : true;
+  }
+
+  /** Resume serving after a background audit failure; fix the sink first. */
+  clearAuditFailure(): void {
+    this.mtlsServer?.clearAuditFailure();
   }
 
   async start(): Promise<void> {
