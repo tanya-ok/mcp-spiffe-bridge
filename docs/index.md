@@ -38,7 +38,8 @@ flowchart TB
     class N limit
 ```
 
-[Demo guide](kubernetes-lab.md){ .overview-link }
+[Operations](operations.md){ .overview-link }
+[SPIRE bench](spire-bench.md){ .overview-link }
 [Certificate lifecycle](credential-lifecycle.md){ .overview-link }
 [Production readiness](production-readiness.md){ .overview-link }
 
