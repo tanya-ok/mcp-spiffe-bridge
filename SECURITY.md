@@ -2,9 +2,9 @@
 
 ## Reporting a vulnerability
 
-This repository is not published yet. Once it is published on GitHub, use
-private vulnerability reporting (Security tab, "Report a vulnerability").
-Do not open public issues for security problems.
+Use GitHub private vulnerability reporting (Security tab, "Report a
+vulnerability") once the maintainer has enabled it. Do not open public issues
+for security problems.
 
 ## Supported versions
 
@@ -19,13 +19,16 @@ In scope:
 - SVID validation: SAN parsing, trust domain, validity window, allowlist
 - Workload API fetcher: handling of invalid, expired or missing credentials
 - Configuration validation and audit event content
+- Federation: per-trust-domain chain binding and bundle withdrawal
+- CRL enforcement at the TLS handshake
+- `FileAuditLogger` durability and its fail-closed behavior
 
 Out of scope:
 
 - The SPIRE agent, its workload attestation and the Workload API socket
   permissions, which are trust boundaries of the deployment
 - Per-tool authorization, user identity and OAuth in consuming applications
-- Federation, which is unsupported and rejected at startup
+- Delivery of audit files to central storage after `FileAuditLogger` writes them
 
 ## Secure defaults
 
@@ -34,4 +37,6 @@ Out of scope:
 - TLS 1.3 is the minimum unless `transport.minTlsVersion` allows TLS 1.2.
 - Denied callers receive a generic `unauthorized` body; the reason is recorded
   only in the audit event.
-- Only the local trust domain is trusted.
+- Only the local trust domain is trusted unless `federatedTrustDomains` names
+  others.
+- A failed authentication audit write refuses the request.

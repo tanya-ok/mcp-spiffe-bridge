@@ -4,9 +4,10 @@ This page defines acceptance criteria, not an approval badge. Publication stays
 separate from local preparation. No remote deployment is implied by a successful
 local documentation build.
 
-!!! note "Not published"
-    This repository is not published yet. Publication is a separate maintainer
-    decision.
+!!! note "Not published to npm"
+    The package is not published to npm yet. Publication is a separate
+    maintainer decision. Remaining release gates are tracked in
+    [production readiness](production-readiness.md).
 
 ## Reproduce the project
 
@@ -18,6 +19,7 @@ pnpm typecheck
 pnpm test
 pnpm lint
 pnpm build
+pnpm run check:package
 ```
 
 Run the [installed package demo](installed-demo.md), then follow the separate

@@ -6,10 +6,10 @@
  * for agent setup). For pure offline dev, set the bridge's `degrade.mode`
  * to `warn-and-skip`; see the comment below.
  *
- *   pnpm tsx examples/basic/server.ts
+ *   pnpm build && node examples/basic/server.ts
  */
 
-import { createMcpSpiffeBridge, getCallerIdentity } from '../../src/index.js';
+import { createMcpSpiffeBridge, getCallerIdentity } from 'mcp-spiffe-bridge';
 
 const bridge = createMcpSpiffeBridge({
   workloadApi: {

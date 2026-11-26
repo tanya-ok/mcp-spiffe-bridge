@@ -13,14 +13,18 @@ Minimal MCP server protected by SPIFFE mTLS.
 5. Run the server:
 
    ```fish
-   pnpm tsx examples/basic/server.ts
+   pnpm build
+   node examples/basic/server.ts
    ```
+
+   Node 26 runs the TypeScript file directly, and the import resolves to the
+   built package through its own `exports` map.
 
 6. Call it with a curl that presents a client SVID:
 
    ```fish
-   # Fetch a client SVID manually via the workload API CLI, or have your
-   # client use mcp-spiffe-bridge on the caller side (future release).
+   # Fetch a client SVID with the SPIRE agent CLI:
+   # spire-agent api fetch x509 -write .
    curl --cacert bundle.pem --cert client.pem --key client.key \
         https://localhost:8443/
    ```

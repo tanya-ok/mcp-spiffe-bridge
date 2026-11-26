@@ -14,6 +14,7 @@ nav = [
   { "Certificate lifecycle" = "credential-lifecycle.md" },
   { "Lab guide" = "kubernetes-lab.md" },
   { "For maintainers" = [
+  { "Production readiness" = "production-readiness.md" },
   { "Publication readiness" = "publication-readiness.md" },
   { "Development plan" = "development-plan.md" },
 ] },
