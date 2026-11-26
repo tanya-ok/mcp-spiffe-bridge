@@ -39,8 +39,11 @@ export interface SpiffeId {
  * `certChain` is DER-encoded, leaf certificate first.
  * `privateKey` is PKCS#8 DER.
  * `trustBundle` holds CA certs for the issuer's own trust domain.
- * `federatedBundles` holds CA certs for other trust domains. They are parsed but
- * not trusted, because federation is unsupported.
+ * `federatedBundles` holds CA certs for other trust domains, keyed by trust
+ * domain name. They are trusted only for domains named in
+ * `ValidatorOptions.federatedTrustDomains`.
+ * `crls` holds DER certificate revocation lists from the Workload API. When
+ * present, the listener enforces them for every peer chain (see README).
  */
 export interface X509Svid {
   readonly spiffeId: SpiffeId;
@@ -50,6 +53,7 @@ export interface X509Svid {
   readonly notAfter: Date;
   readonly trustBundle: readonly Uint8Array[];
   readonly federatedBundles?: ReadonlyMap<TrustDomainString, readonly Uint8Array[]>;
+  readonly crls?: readonly Uint8Array[];
 }
 
 /**

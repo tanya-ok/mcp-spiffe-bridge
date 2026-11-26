@@ -1,4 +1,5 @@
 import { createPrivateKey, X509Certificate } from 'node:crypto';
+import { createSecureContext } from 'node:tls';
 import { createClient, parseCertificate, parseCertificateBundle } from 'spiffe';
 import {
   SvidUnavailableError,
@@ -206,7 +207,14 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
     federatedBundles: { [key: string]: Uint8Array };
     crl?: Uint8Array[];
   }): X509Svid | null {
-    if (response.crl?.length) throw new SvidUnavailableError('Workload API CRLs are not supported');
+    const crls = (response.crl ?? []).map((c) => new Uint8Array(c));
+    if (crls.length > 0) {
+      try {
+        createSecureContext({ crl: crls.map((c) => derToPem('X509 CRL', c)) });
+      } catch (err) {
+        throw new SvidUnavailableError('Workload API returned an invalid CRL', { cause: err });
+      }
+    }
     const first = response.svids[0];
     if (!first) return null;
 
@@ -261,12 +269,18 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
       notAfter: leaf.notAfter,
       trustBundle,
       ...(federated ? { federatedBundles: federated } : {}),
+      ...(crls.length > 0 ? { crls } : {}),
     };
     return svid;
   }
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────
+
+function derToPem(label: string, der: Uint8Array): string {
+  const b64 = Buffer.from(der).toString('base64');
+  return `-----BEGIN ${label}-----\n${b64.match(/.{1,64}/g)?.join('\n') ?? b64}\n-----END ${label}-----`;
+}
 
 function normalizeSocketUrl(socketPath: string): string {
   if (socketPath.startsWith('unix://')) return socketPath;

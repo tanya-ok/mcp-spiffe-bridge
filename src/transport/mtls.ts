@@ -104,6 +104,11 @@ export class MtlsTransportServer {
         'ERR_SSL_CERTIFICATE_VERIFY_FAILED',
         'INVALID_CA',
         'CERT_UNTRUSTED',
+        'UNABLE_TO_GET_CRL',
+        'CRL_HAS_EXPIRED',
+        'CRL_NOT_YET_VALID',
+        'CRL_SIGNATURE_FAILURE',
+        'UNABLE_TO_DECRYPT_CRL_SIGNATURE',
       ]);
       const code =
         typeof socket.authorizationError === 'string'
@@ -112,9 +117,11 @@ export class MtlsTransportServer {
       const message =
         code === 'ERR_SSL_PEER_DID_NOT_RETURN_A_CERTIFICATE'
           ? 'TLS client certificate required'
-          : certificateErrors.has(code)
-            ? 'TLS certificate verification failed'
-            : 'TLS handshake failed';
+          : code === 'CERT_REVOKED' || /SSLV3_ALERT_CERTIFICATE_REVOKED/.test(code)
+            ? 'TLS certificate revoked'
+            : certificateErrors.has(code)
+              ? 'TLS certificate verification failed'
+              : 'TLS handshake failed';
       void Promise.resolve()
         .then(() =>
           this.opts.audit.log(
@@ -308,6 +315,7 @@ function svidToSecureContextOptions(
     cert: certPem,
     key: keyPem,
     ca: caPem,
+    ...(svid.crls?.length ? { crl: svid.crls.map(derToPem.bind(null, 'X509 CRL')) } : {}),
     minVersion,
     secureOptions: constants.SSL_OP_NO_TICKET,
   };

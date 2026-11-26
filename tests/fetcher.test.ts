@@ -82,6 +82,7 @@ import { createMcpSpiffeBridge } from '../src/bridge.js';
 import { ConfigInvalidError } from '../src/errors.js';
 import { WorkloadApiSvidFetcher } from '../src/svid/fetcher.js';
 import type { X509Svid } from '../src/types.js';
+import { syntheticCa } from './helpers/pki.js';
 import { makeSpiffeCert } from './helpers/test-certs.js';
 
 describe('WorkloadApiSvidFetcher', () => {
@@ -132,6 +133,28 @@ describe('WorkloadApiSvidFetcher', () => {
     const svid = await fetcher.getX509Svid();
     expect(svid.spiffeId.full).toBe('spiffe://td.test/workload/a');
     expect(svid.trustBundle).toHaveLength(1);
+    expect(svid.crls).toBeUndefined();
+  });
+
+  it('surfaces well-formed CRLs from the snapshot', async () => {
+    const fetcher = makeFetcher();
+    const cert = await makeSpiffeCert({ spiffeId: 'spiffe://td.test/workload/a' });
+    const crl = await (await syntheticCa()).crl(['0a01']);
+    currentCall.queue.push({
+      svids: [
+        {
+          spiffeId: 'spiffe://td.test/workload/a',
+          x509Svid: cert.certDer,
+          x509SvidKey: cert.privateKeyDer,
+          bundle: cert.certDer,
+          hint: '',
+        },
+      ],
+      federatedBundles: {},
+      crl: [crl],
+    });
+    const svid = await fetcher.getX509Svid();
+    expect(svid.crls).toEqual([crl]);
   });
 
   it('fires the rotation callback when a new SVID arrives', async () => {
@@ -385,7 +408,7 @@ describe('bounded stream recovery', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each(['empty', 'wrong-key', 'wrong-identity', 'crl'])(
+  it.each(['empty', 'wrong-key', 'wrong-identity', 'malformed-crl'])(
     'invalidates rather than ignoring an invalid %s update',
     async (kind) => {
       const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
@@ -400,7 +423,7 @@ describe('bounded stream recovery', () => {
         invalid.svids[0].x509SvidKey = other.privateKeyDer;
       if (kind === 'wrong-identity' && invalid.svids[0])
         invalid.svids[0].spiffeId = 'spiffe://example.org/another';
-      if (kind === 'crl') invalid.crl = [new Uint8Array([1])];
+      if (kind === 'malformed-crl') invalid.crl = [new Uint8Array([1])];
       currentCall.queue.push(invalid);
       await vi.advanceTimersByTimeAsync(0);
       await expect(f.getX509Svid()).rejects.toThrow('stream unavailable');
