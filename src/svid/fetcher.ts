@@ -130,7 +130,7 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
   }
 
   private async runWithReconnect(): Promise<void> {
-    const maxAttempts = this.options.reconnect?.maxAttempts ?? 5;
+    const maxAttempts = this.options.reconnect?.maxAttempts ?? Number.POSITIVE_INFINITY;
     const initialDelay = this.options.reconnect?.initialDelayMs ?? 250;
     const maxDelay = this.options.reconnect?.maxDelayMs ?? 5000;
     while (!this.closed) {
@@ -140,7 +140,9 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
         if (!this.closed) this.invalidate(error);
       }
       if (this.closed || this.retries >= maxAttempts) return;
-      const delay = Math.min(initialDelay * 2 ** this.retries, maxDelay);
+      const cap = Math.min(initialDelay * 2 ** Math.min(this.retries, 30), maxDelay);
+      // Equal jitter: spread reconnects of many workloads without exceeding the cap.
+      const delay = cap / 2 + Math.random() * (cap / 2);
       this.retries++;
       await abortableDelay(delay, this.abortController.signal);
     }

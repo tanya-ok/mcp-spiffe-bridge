@@ -200,9 +200,13 @@ export interface WorkloadApiOptions {
   readonly socketPath: string;
   readonly connectTimeoutMs?: number;
   readonly rpcTimeoutMs?: number;
-  /** Consecutive reconnect budget; default 5, zero disables recovery. */
+  /**
+   * Reconnect policy. By default the fetcher retries without limit with capped
+   * exponential backoff and jitter; readiness stays false until a fresh SVID
+   * arrives. `maxAttempts` bounds consecutive retries; zero disables recovery.
+   */
   readonly reconnect?: {
-    readonly maxAttempts: number;
+    readonly maxAttempts?: number;
     readonly initialDelayMs?: number;
     readonly maxDelayMs?: number;
   };

@@ -425,6 +425,42 @@ describe('bounded stream recovery', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('retries without limit by default, within the backoff cap', async () => {
+    vi.useFakeTimers();
+    fetcher = new WorkloadApiSvidFetcher({
+      socketPath: '/tmp/fake.sock',
+      rpcTimeoutMs: 1000,
+      connectTimeoutMs: 50,
+      reconnect: { initialDelayMs: 10, maxDelayMs: 20 },
+    });
+    const health: boolean[] = [];
+    fetcher.watchAvailability((available) => health.push(available));
+    for (let i = 0; i < 30; i++) {
+      currentCall.queue.end();
+      if (i === 0) await expect(fetcher.getX509Svid()).rejects.toThrow('stream unavailable');
+      currentCall = makeCall();
+      await vi.advanceTimersByTimeAsync(20);
+    }
+    expect(callCount).toBeGreaterThan(30);
+    await expect(fetcher.getX509Svid()).rejects.toThrow('stream unavailable');
+    const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
+    currentCall.queue.push(responseFor(cert));
+    await vi.advanceTimersByTimeAsync(20);
+    expect((await fetcher.getX509Svid()).spiffeId.full).toBe('spiffe://example.org/agent/research');
+    expect(health.at(-1)).toBe(true);
+  });
+
+  it('keeps every jittered delay at or below the cap', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    const f = recovering(3);
+    currentCall.queue.end();
+    await expect(f.getX509Svid()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(20 * 3);
+    expect(callCount).toBe(4);
+    random.mockRestore();
+  });
+
   it('cancels backoff immediately on shutdown', async () => {
     vi.useFakeTimers();
     const f = recovering();

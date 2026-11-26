@@ -29,7 +29,7 @@ const workloadApiSchema = z.object({
   rpcTimeoutMs: z.number().int().positive().optional(),
   reconnect: z
     .object({
-      maxAttempts: z.number().int().min(0).max(100),
+      maxAttempts: z.number().int().min(0).optional(),
       initialDelayMs: z.number().int().min(1).max(60_000).optional(),
       maxDelayMs: z.number().int().min(1).max(60_000).optional(),
     })

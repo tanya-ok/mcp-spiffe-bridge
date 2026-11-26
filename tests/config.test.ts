@@ -126,7 +126,7 @@ describe('validateBridgeOptions', () => {
   });
   it.each([
     { maxAttempts: -1 },
-    { maxAttempts: 101 },
+    { maxAttempts: 1.5 },
     { maxAttempts: 2, initialDelayMs: 0 },
     { maxAttempts: 2, initialDelayMs: 50, maxDelayMs: 10 },
   ])('refuses invalid reconnect limits %#', (reconnect) => {
