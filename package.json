@@ -58,11 +58,12 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "biome check src tests examples scripts",
-    "lint:fix": "biome check --write src tests examples scripts",
-    "format": "biome format --write src tests examples scripts",
+    "lint": "biome check src tests examples scripts deploy",
+    "lint:fix": "biome check --write src tests examples scripts deploy",
+    "format": "biome format --write src tests examples scripts deploy",
     "check:package": "node scripts/check-package.mjs",
-    "prepublishOnly": "pnpm build && pnpm run check:package"
+    "prepublishOnly": "pnpm build && pnpm run check:package",
+    "bench:spire": "deploy/spire-lab/bench.sh"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": ">=1.32.0 <2.0.0"
