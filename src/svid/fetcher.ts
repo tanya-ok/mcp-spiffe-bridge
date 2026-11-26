@@ -6,8 +6,10 @@ import {
   WorkloadApiConnectionError,
   WorkloadApiTimeoutError,
 } from '../errors.js';
+import { Metrics } from '../metrics.js';
 import { parseSpiffeId } from '../spiffe-id.js';
 import type {
+  BridgeMetrics,
   SvidFetcher,
   SvidWatcher,
   TrustDomainString,
@@ -47,7 +49,13 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
   private closed = false;
   private streamFailure: Error | null = null;
 
-  constructor(private readonly options: WorkloadApiOptions) {
+  private readonly metrics: Metrics;
+
+  constructor(
+    private readonly options: WorkloadApiOptions,
+    hooks?: { readonly metrics?: BridgeMetrics },
+  ) {
+    this.metrics = new Metrics(hooks?.metrics);
     const baseUrl = normalizeSocketUrl(options.socketPath);
     this.client = createClient(baseUrl);
     this.firstMessageDeferred = deferred<X509Svid>();
@@ -144,6 +152,7 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
       // Equal jitter: spread reconnects of many workloads without exceeding the cap.
       const delay = cap / 2 + Math.random() * (cap / 2);
       this.retries++;
+      this.metrics.increment('workload_api_reconnect');
       await abortableDelay(delay, this.abortController.signal);
     }
   }

@@ -164,8 +164,12 @@ export interface SvidValidator {
 export type SpiffeAuditEventType = 'auth_success' | 'auth_failure' | 'tool_call' | 'svid_rotated';
 export type SpiffeAuditOutcome = 'allowed' | 'denied' | 'error';
 
-/** Exactly the audit shape declared in the spec. Field names kept snake_case for log compatibility. */
+/** Current audit event schema version; see docs/architecture/contracts/audit-event.md. */
+export const AUDIT_SCHEMA_VERSION = 1;
+
+/** Audit event, schema version 1. Field names are snake_case for log compatibility. */
 export interface SpiffeAuditEvent {
+  readonly schema_version: typeof AUDIT_SCHEMA_VERSION;
   readonly timestamp: string;
   readonly event_type: SpiffeAuditEventType;
   readonly caller_spiffe_id: string | null;
@@ -313,11 +317,33 @@ export interface AuditOptions {
   readonly backgroundFailure?: AuditBackgroundFailure;
 }
 
+export type BridgeCounter =
+  | 'handshake_accepted'
+  | 'handshake_refused'
+  | 'request_authorized'
+  | 'request_refused'
+  | 'audit_dropped'
+  | 'svid_rotated'
+  | 'workload_api_reconnect';
+
+export type BridgeHistogram = 'request_auth_seconds';
+
+/**
+ * Optional metrics hooks with no library dependency. Implementations must be
+ * cheap and must not throw; thrown errors are ignored. `reason` labels use the
+ * vocabulary in docs/architecture/contracts/audit-event.md.
+ */
+export interface BridgeMetrics {
+  increment?(name: BridgeCounter, labels?: Readonly<Record<string, string>>): void;
+  observe?(name: BridgeHistogram, value: number, labels?: Readonly<Record<string, string>>): void;
+}
+
 export interface BridgeOptions {
   readonly workloadApi: WorkloadApiOptions;
   readonly validator: ValidatorOptions;
   readonly transport: TransportOptions;
   readonly audit?: AuditOptions;
+  readonly metrics?: BridgeMetrics;
   readonly degrade?: DegradeOptions;
 }
 

@@ -752,4 +752,50 @@ describe('root rotation and established connection policy', () => {
       await transport.stop();
     }
   });
+
+  it('reports handshake, request and audit metrics without affecting outcomes', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const intruder = await ca.issue('spiffe://example.org/agent/intruder');
+    const port = await freePort();
+    const fetcher = new MutableFetcher(own);
+    const counts = new Map<string, number>();
+    const observed: string[] = [];
+    const metrics = {
+      increment: (name: string, labels?: Readonly<Record<string, string>>) => {
+        const key = labels ? `${name}{${Object.values(labels).join(',')}}` : name;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        if (name === 'request_refused') throw new Error('broken metrics backend');
+      },
+      observe: (_name: string, _value: number, labels?: Readonly<Record<string, string>>) => {
+        observed.push(labels?.outcome ?? '');
+      },
+    };
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit: { log: vi.fn() },
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+      metrics,
+    });
+    transport.setAuthorizedHandler((_req, res) => res.end('served'));
+    await transport.start();
+    try {
+      expect((await request(port, own, peer)).status).toBe(200);
+      expect((await request(port, own, intruder)).status).toBe(401);
+      await expect(request(port, own)).rejects.toThrow();
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      await vi.waitFor(() =>
+        expect(counts.get('handshake_refused{no_client_certificate}')).toBe(1),
+      );
+      expect(counts.get('handshake_accepted')).toBe(2);
+      expect(counts.get('request_authorized')).toBe(1);
+      expect(counts.get('request_refused{spiffe_id_disallowed}')).toBe(1);
+      expect(counts.get('svid_rotated')).toBe(1);
+      expect(observed.sort()).toEqual(['allowed', 'denied']);
+    } finally {
+      await transport.stop();
+    }
+  });
 });

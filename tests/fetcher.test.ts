@@ -427,12 +427,16 @@ describe('bounded stream recovery', () => {
 
   it('retries without limit by default, within the backoff cap', async () => {
     vi.useFakeTimers();
-    fetcher = new WorkloadApiSvidFetcher({
-      socketPath: '/tmp/fake.sock',
-      rpcTimeoutMs: 1000,
-      connectTimeoutMs: 50,
-      reconnect: { initialDelayMs: 10, maxDelayMs: 20 },
-    });
+    const reconnects = vi.fn();
+    fetcher = new WorkloadApiSvidFetcher(
+      {
+        socketPath: '/tmp/fake.sock',
+        rpcTimeoutMs: 1000,
+        connectTimeoutMs: 50,
+        reconnect: { initialDelayMs: 10, maxDelayMs: 20 },
+      },
+      { metrics: { increment: reconnects } },
+    );
     const health: boolean[] = [];
     fetcher.watchAvailability((available) => health.push(available));
     for (let i = 0; i < 30; i++) {
@@ -442,6 +446,7 @@ describe('bounded stream recovery', () => {
       await vi.advanceTimersByTimeAsync(20);
     }
     expect(callCount).toBeGreaterThan(30);
+    expect(reconnects).toHaveBeenCalledWith('workload_api_reconnect', undefined);
     await expect(fetcher.getX509Svid()).rejects.toThrow('stream unavailable');
     const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
     currentCall.queue.push(responseFor(cert));

@@ -40,7 +40,6 @@ export {
   MtlsTransportServer,
   type MtlsTransportServerOptions,
 } from './transport/mtls.js';
-
 // ─── Types (type-only re-exports) ───────────────────────────────────────
 export type {
   AuditBackgroundFailure,
@@ -48,6 +47,9 @@ export type {
   AuditOptions,
   AuditSinkStats,
   AuthError,
+  BridgeCounter,
+  BridgeHistogram,
+  BridgeMetrics,
   BridgeOptions,
   CallerMatcher,
   CrlScope,
@@ -75,3 +77,4 @@ export type {
   WorkloadApiOptions,
   X509Svid,
 } from './types.js';
+export { AUDIT_SCHEMA_VERSION } from './types.js';

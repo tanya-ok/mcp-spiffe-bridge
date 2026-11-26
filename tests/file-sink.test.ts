@@ -21,6 +21,7 @@ import type { SpiffeAuditEvent } from '../src/types.js';
 
 function event(n: number): SpiffeAuditEvent {
   return {
+    schema_version: 1,
     timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString(),
     event_type: 'auth_success',
     caller_spiffe_id: 'spiffe://example.org/agent/research',

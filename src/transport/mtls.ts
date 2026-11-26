@@ -8,6 +8,7 @@ import {
   buildAuthSuccessEvent,
   buildSvidRotatedEvent,
 } from '../audit/logger.js';
+import { Metrics } from '../metrics.js';
 import { parseSpiffeId } from '../spiffe-id.js';
 import { checkRevocation } from '../svid/crl.js';
 import { verifyPathToAnchors } from '../svid/path.js';
@@ -16,6 +17,7 @@ import type {
   AuditBackgroundFailure,
   AuditLogger,
   AuthError,
+  BridgeMetrics,
   MinTlsVersion,
   SpiffeAuditEvent,
   SvidFetcher,
@@ -44,8 +46,9 @@ export interface MtlsTransportServerOptions {
   readonly transport: TransportOptions;
   /** Foreign trust domains whose federated bundles join the TLS trust store. */
   readonly federatedTrustDomains?: readonly TrustDomainString[];
-  /** What a failed handshake-denial or rotation audit does. Default `fail-closed`. */
+  /** What a failed rotation audit does. Default `fail-closed`. */
   readonly auditBackgroundFailure?: AuditBackgroundFailure;
+  readonly metrics?: BridgeMetrics;
 }
 
 /**
@@ -80,10 +83,12 @@ export class MtlsTransportServer {
   private readonly federated: readonly TrustDomainString[];
 
   private readonly tlsCrls: boolean;
+  private readonly metrics: Metrics;
 
   constructor(private readonly opts: MtlsTransportServerOptions) {
     this.federated = opts.federatedTrustDomains ?? [];
     this.tlsCrls = (opts.transport.crlScope ?? 'all-issuers') === 'all-issuers';
+    this.metrics = new Metrics(opts.metrics);
   }
 
   setAuthorizedHandler(handler: AuthorizedRequestHandler): void {
@@ -180,6 +185,7 @@ export class MtlsTransportServer {
             : certificateErrors.has(code)
               ? 'TLS certificate verification failed'
               : 'TLS handshake failed';
+      this.metrics.increment('handshake_refused', { reason: handshakeReason(message) });
       this.auditHandshakeDenial(
         buildAuthFailureEvent(
           { code: 'SVID_INVALID', message, observedSpiffeId: null },
@@ -204,6 +210,7 @@ export class MtlsTransportServer {
         socket.destroy();
         return;
       }
+      this.metrics.increment('handshake_accepted');
       const deadline = Math.min(
         initialSvid.notAfter.getTime(),
         new Date(peer.validTo).getTime(),
@@ -240,6 +247,7 @@ export class MtlsTransportServer {
         process.stderr.write('bridge: rotated TLS context unavailable\n');
         return;
       }
+      this.metrics.increment('svid_rotated');
       this.backgroundAudit(
         () => buildSvidRotatedEvent(newSvid, { requestId: randomUUID() }),
         'rotation',
@@ -300,7 +308,7 @@ export class MtlsTransportServer {
       try {
         audit.logUnauthenticated(event);
       } catch {
-        this.droppedHandshakeAudit++;
+        this.dropHandshakeAudit();
       }
       return;
     }
@@ -311,15 +319,20 @@ export class MtlsTransportServer {
     );
     this.handshakeTokensAt = now;
     if (this.handshakeTokens < 1) {
-      this.droppedHandshakeAudit++;
+      this.dropHandshakeAudit();
       return;
     }
     this.handshakeTokens -= 1;
     void Promise.resolve()
       .then(() => audit.log(event))
       .catch(() => {
-        this.droppedHandshakeAudit++;
+        this.dropHandshakeAudit();
       });
+  }
+
+  private dropHandshakeAudit(): void {
+    this.droppedHandshakeAudit++;
+    this.metrics.increment('audit_dropped', { channel: 'unauthenticated' });
   }
 
   /**
@@ -348,6 +361,8 @@ export class MtlsTransportServer {
     if (!this.ready) throw new Error('credential state unavailable');
     if (this.auditFailed) throw new Error('audit unavailable');
     const epoch = this.credentialEpoch;
+    const started = process.hrtime.bigint();
+    const elapsed = () => Number(process.hrtime.bigint() - started) / 1e9;
     const own = await this.opts.fetcher.getX509Svid();
     const requestId = randomUUID();
     // Node 17+: peer cert is exposed as X509Certificate via getPeerX509Certificate().
@@ -364,18 +379,22 @@ export class MtlsTransportServer {
     const issuers = peerIssuers(socket);
     const unbound = this.bindToTrustDomain(peerCert, peerDer, issuers, own);
     if (unbound) {
+      this.refused(unbound.code, elapsed());
       await this.opts.audit.log(buildAuthFailureEvent(unbound, { requestId }));
       this.deny(res);
       return;
     }
     const result = await this.opts.validator.validate(peerDer, undefined, issuers);
     if (!result.ok) {
+      this.refused(result.error.code, elapsed());
       await this.opts.audit.log(buildAuthFailureEvent(result.error, { requestId }));
       this.deny(res);
       return;
     }
 
     await this.opts.audit.log(buildAuthSuccessEvent(result.identity, { requestId }));
+    this.metrics.increment('request_authorized');
+    this.metrics.observe('request_auth_seconds', elapsed(), { outcome: 'allowed' });
 
     if (!this.handler) {
       res.statusCode = 503;
@@ -425,6 +444,12 @@ export class MtlsTransportServer {
       if (reason) return { code: 'SVID_INVALID', message: reason, observedSpiffeId: id.full };
     }
     return null;
+  }
+
+  private refused(code: string, seconds: number): void {
+    const reason = code.toLowerCase();
+    this.metrics.increment('request_refused', { reason });
+    this.metrics.observe('request_auth_seconds', seconds, { outcome: 'denied' });
   }
 
   private deny(res: ServerResponse): void {
@@ -482,6 +507,13 @@ function svidToSecureContextOptions(
 }
 
 const HANDSHAKE_AUDIT_PER_SECOND = 20;
+
+function handshakeReason(message: string): string {
+  if (message === 'TLS client certificate required') return 'no_client_certificate';
+  if (message === 'TLS certificate revoked') return 'certificate_revoked';
+  if (message === 'TLS certificate verification failed') return 'certificate_untrusted';
+  return 'handshake_failed';
+}
 
 /** Issuer certificates of the verified peer chain, leaf excluded. */
 function peerIssuers(socket: tls.TLSSocket): Uint8Array[] {

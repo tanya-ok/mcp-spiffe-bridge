@@ -51,7 +51,10 @@ export class McpSpiffeBridgeImpl implements McpSpiffeBridge {
     // Zod-validated separately by `createMcpSpiffeBridge`; accept pre-validated here.
     const audit = options.audit?.logger ?? new StdoutJsonAuditLogger();
 
-    const fetcher = new WorkloadApiSvidFetcher(options.workloadApi);
+    const fetcher = new WorkloadApiSvidFetcher(
+      options.workloadApi,
+      options.metrics ? { metrics: options.metrics } : undefined,
+    );
     const validator = new SpiffeValidator(options.validator, fetcher);
 
     const mtls =
@@ -64,6 +67,7 @@ export class McpSpiffeBridgeImpl implements McpSpiffeBridge {
             ...(options.validator.federatedTrustDomains
               ? { federatedTrustDomains: options.validator.federatedTrustDomains }
               : {}),
+            ...(options.metrics ? { metrics: options.metrics } : {}),
             ...(options.audit?.backgroundFailure
               ? { auditBackgroundFailure: options.audit.backgroundFailure }
               : {}),

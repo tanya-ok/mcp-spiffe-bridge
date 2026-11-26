@@ -1,11 +1,12 @@
-import type {
-  AuditLogger,
-  AuthError,
-  SpiffeAuditEvent,
-  SpiffeAuditEventType,
-  SpiffeCallContext,
-  ValidatedIdentity,
-  X509Svid,
+import {
+  AUDIT_SCHEMA_VERSION,
+  type AuditLogger,
+  type AuthError,
+  type SpiffeAuditEvent,
+  type SpiffeAuditEventType,
+  type SpiffeCallContext,
+  type ValidatedIdentity,
+  type X509Svid,
 } from '../types.js';
 
 /**
@@ -94,7 +95,9 @@ export function buildSvidRotatedEvent(svid: X509Svid, common: BuildEventCommon):
 
 // ─── internals ──────────────────────────────────────────────────────────
 
-type Overrides = Partial<Omit<SpiffeAuditEvent, 'timestamp' | 'event_type' | 'request_id'>>;
+type Overrides = Partial<
+  Omit<SpiffeAuditEvent, 'schema_version' | 'timestamp' | 'event_type' | 'request_id'>
+>;
 
 function baseEvent(
   type: SpiffeAuditEventType,
@@ -103,6 +106,7 @@ function baseEvent(
 ): SpiffeAuditEvent {
   const ts = (common.now ?? new Date()).toISOString();
   return {
+    schema_version: AUDIT_SCHEMA_VERSION,
     timestamp: ts,
     event_type: type,
     caller_spiffe_id: overrides.caller_spiffe_id ?? null,

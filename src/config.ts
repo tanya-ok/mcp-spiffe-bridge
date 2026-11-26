@@ -85,6 +85,8 @@ const bridgeOptionsSchema = z.object({
   transport: transportSchema,
   audit: auditSchema.optional(),
   degrade: degradeSchema.optional(),
+  // metrics hooks are functions, not JSON config.
+  metrics: z.unknown().optional(),
 });
 
 /**
@@ -109,7 +111,7 @@ export function validateBridgeOptions(input: unknown): BridgeOptions {
       'transport.mode = "mtls-server" requires transport.sse.{host,port}',
     );
   }
-  const opaque = new Set<unknown>([v.audit?.logger, v.degrade?.fakeSvid]);
+  const opaque = new Set<unknown>([v.audit?.logger, v.degrade?.fakeSvid, v.metrics]);
   return deepFreeze(v, opaque) as unknown as BridgeOptions;
 }
 
