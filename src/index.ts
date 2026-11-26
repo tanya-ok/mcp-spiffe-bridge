@@ -57,6 +57,7 @@ export type {
   DegradeOptions,
   McpSpiffeBridge,
   MinTlsVersion,
+  RotationMode,
   SpiffeAuditEvent,
   SpiffeAuditEventType,
   SpiffeAuditOutcome,

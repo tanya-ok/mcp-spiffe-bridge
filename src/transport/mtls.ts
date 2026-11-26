@@ -1,7 +1,7 @@
 import { constants, randomBytes, randomUUID, X509Certificate } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as https from 'node:https';
-import type { Duplex } from 'node:stream';
+import type * as net from 'node:net';
 import type * as tls from 'node:tls';
 import {
   buildAuthFailureEvent,
@@ -19,6 +19,7 @@ import type {
   AuthError,
   BridgeMetrics,
   MinTlsVersion,
+  RotationMode,
   SpiffeAuditEvent,
   SvidFetcher,
   SvidValidator,
@@ -71,7 +72,7 @@ export class MtlsTransportServer {
   private handler: AuthorizedRequestHandler | null = null;
   private unwatch: (() => void) | null = null;
   private unwatchAvailability: (() => void) | null = null;
-  private readonly sockets = new Set<Duplex>();
+  private readonly sockets = new Set<net.Socket>();
   private credentialEpoch = 0;
   private ready = false;
   private auditFailed = false;
@@ -84,11 +85,18 @@ export class MtlsTransportServer {
 
   private readonly tlsCrls: boolean;
   private readonly metrics: Metrics;
+  private readonly rotationMode: RotationMode;
+  private readonly maxAgeMs: number;
+  private rotationGeneration = 0;
+  private readonly handshakeGeneration = new WeakMap<net.Socket, number>();
+  private readonly secured = new Map<string, tls.TLSSocket>();
 
   constructor(private readonly opts: MtlsTransportServerOptions) {
     this.federated = opts.federatedTrustDomains ?? [];
     this.tlsCrls = (opts.transport.crlScope ?? 'all-issuers') === 'all-issuers';
     this.metrics = new Metrics(opts.metrics);
+    this.rotationMode = opts.transport.rotation ?? 'drain';
+    this.maxAgeMs = opts.transport.maxConnectionAgeMs ?? 300_000;
   }
 
   setAuthorizedHandler(handler: AuthorizedRequestHandler): void {
@@ -196,15 +204,30 @@ export class MtlsTransportServer {
     this.ready = true;
     this.server.on('connection', (socket) => {
       this.sockets.add(socket);
+      this.handshakeGeneration.set(socket, this.rotationGeneration);
       socket.once('close', () => {
         this.sockets.delete(socket);
       });
     });
     this.server.on('secureConnection', (socket) => {
-      if (socket.destroyed || !this.ready || this.auditFailed || socket.isSessionReused()) {
+      const key = socketKey(socket);
+      const raw = [...this.sockets].find((s) => socketKey(s) === key);
+      const startedIn = raw ? this.handshakeGeneration.get(raw) : undefined;
+      if (
+        socket.destroyed ||
+        !this.ready ||
+        this.auditFailed ||
+        socket.isSessionReused() ||
+        startedIn !== this.rotationGeneration
+      ) {
+        // A handshake that straddled a rotation used the previous context.
         socket.destroy();
         return;
       }
+      this.secured.set(key, socket);
+      socket.once('close', () => {
+        if (this.secured.get(key) === socket) this.secured.delete(key);
+      });
       const peer = socket.getPeerX509Certificate();
       if (!peer) {
         socket.destroy();
@@ -214,7 +237,7 @@ export class MtlsTransportServer {
       const deadline = Math.min(
         initialSvid.notAfter.getTime(),
         new Date(peer.validTo).getTime(),
-        Date.now() + 300_000,
+        Date.now() + this.maxAgeMs,
       );
       const timer = setTimeout(() => socket.destroy(), Math.max(0, deadline - Date.now()));
       timer.unref();
@@ -234,7 +257,7 @@ export class MtlsTransportServer {
 
     this.unwatch = this.opts.fetcher.watchSvids((newSvid) => {
       this.ready = false;
-      this.disconnect();
+      if (this.rotationMode === 'close') this.disconnect();
       try {
         this.server?.setSecureContext(
           svidToSecureContextOptions(newSvid, minVersion, this.federated, this.tlsCrls),
@@ -242,8 +265,10 @@ export class MtlsTransportServer {
         this.server?.setTicketKeys(randomBytes(48));
         initialSvid = newSvid;
         this.current = newSvid;
+        if (this.rotationMode === 'drain') this.drain(newSvid);
         this.ready = this.server !== null;
       } catch {
+        this.disconnect();
         process.stderr.write('bridge: rotated TLS context unavailable\n');
         return;
       }
@@ -351,7 +376,40 @@ export class MtlsTransportServer {
       });
   }
 
+  /**
+   * Rotation without cutting healthy streams: pending handshakes close, and an
+   * established connection stays open only if its peer chain is still valid
+   * against the new bundles and the snapshot carries no CRLs. Kept connections
+   * still end at their original deadline (own and peer expiry, maximum age).
+   */
+  private drain(next: X509Svid): void {
+    this.rotationGeneration++;
+    for (const raw of this.sockets) {
+      const secured = this.secured.get(socketKey(raw));
+      if (!secured) {
+        raw.destroy();
+        continue;
+      }
+      if (!this.stillTrusted(secured, next)) secured.destroy();
+    }
+  }
+
+  private stillTrusted(socket: tls.TLSSocket, next: X509Svid): boolean {
+    if (next.crls?.length) return false;
+    const peer = socket.getPeerX509Certificate();
+    if (!peer) return false;
+    try {
+      return (
+        this.bindToTrustDomain(peer, new Uint8Array(peer.raw), peerIssuers(socket), next) === null
+      );
+    } catch {
+      return false;
+    }
+  }
+
   private disconnect(): void {
+    this.rotationGeneration++;
+    this.secured.clear();
     this.credentialEpoch++;
     for (const socket of this.sockets) socket.destroy();
     this.sockets.clear();
@@ -361,6 +419,7 @@ export class MtlsTransportServer {
     if (!this.ready) throw new Error('credential state unavailable');
     if (this.auditFailed) throw new Error('audit unavailable');
     const epoch = this.credentialEpoch;
+    const generation = this.rotationGeneration;
     const started = process.hrtime.bigint();
     const elapsed = () => Number(process.hrtime.bigint() - started) / 1e9;
     const own = await this.opts.fetcher.getX509Svid();
@@ -402,7 +461,13 @@ export class MtlsTransportServer {
       return;
     }
 
-    if (!this.ready || epoch !== this.credentialEpoch || res.destroyed) return;
+    if (res.destroyed) return;
+    if (!this.ready || epoch !== this.credentialEpoch || generation !== this.rotationGeneration) {
+      // Validation crossed a credential update; the client retries on fresh state.
+      res.writeHead(503, { 'Content-Type': 'application/json', Connection: 'close' });
+      res.end(JSON.stringify({ error: 'service_unavailable' }));
+      return;
+    }
     await runWithCallContext({ caller: result.identity, requestId }, async () => {
       await this.handler?.(req, res, result.identity);
     });
@@ -507,6 +572,13 @@ function svidToSecureContextOptions(
 }
 
 const HANDSHAKE_AUDIT_PER_SECOND = 20;
+
+function socketKey(socket: {
+  readonly remoteAddress?: string | undefined;
+  readonly remotePort?: number | undefined;
+}): string {
+  return `${socket.remoteAddress ?? ''}|${socket.remotePort ?? ''}`;
+}
 
 function handshakeReason(message: string): string {
   if (message === 'TLS client certificate required') return 'no_client_certificate';

@@ -286,7 +286,11 @@ async function stream(
   });
 }
 
-async function serverFor(own: X509Svid, minTlsVersion?: 'TLSv1.2' | 'TLSv1.3') {
+async function serverFor(
+  own: X509Svid,
+  minTlsVersion?: 'TLSv1.2' | 'TLSv1.3',
+  extra: { rotation?: 'drain' | 'close'; maxConnectionAgeMs?: number } = {},
+) {
   const fetcher = new MutableFetcher(own);
   const port = await freePort();
   const audit = { log: vi.fn() };
@@ -298,6 +302,7 @@ async function serverFor(own: X509Svid, minTlsVersion?: 'TLSv1.2' | 'TLSv1.3') {
       mode: 'mtls-server',
       sse: { host: '127.0.0.1', port },
       ...(minTlsVersion ? { minTlsVersion } : {}),
+      ...extra,
     },
   });
   transport.setAuthorizedHandler((_req, res) => {
@@ -337,7 +342,9 @@ describe('root rotation and established connection policy', () => {
       const peerA = await caA.issue(research);
       const peerB = await caB.issue(research);
       const overlap = { ...ownB, trustBundle: [...ownA.trustBundle, ...ownB.trustBundle] };
-      const { fetcher, port, transport, audit } = await serverFor(ownA, version);
+      const { fetcher, port, transport, audit } = await serverFor(ownA, version, {
+        rotation: 'close',
+      });
       try {
         const old = await stream(port, ownA, peerA);
         fetcher.update(overlap);
@@ -513,13 +520,13 @@ describe('root rotation and established connection policy', () => {
     transport.setAuthorizedHandler(handler);
     try {
       const pending = request(port, own, peer).then(
-        () => false,
-        () => true,
+        (r) => r.status,
+        () => 'closed' as const,
       );
       await validating;
       fetcher.update(own);
       release();
-      expect(await pending).toBe(true);
+      expect([503, 'closed']).toContain(await pending);
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(handler).not.toHaveBeenCalled();
       validation.mockRestore();
@@ -794,6 +801,85 @@ describe('root rotation and established connection policy', () => {
       expect(counts.get('request_refused{spiffe_id_disallowed}')).toBe(1);
       expect(counts.get('svid_rotated')).toBe(1);
       expect(observed.sort()).toEqual(['allowed', 'denied']);
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('drains: keeps a stream whose chain stays valid and closes one whose root was removed', async () => {
+    const caA = await certificates();
+    const caB = await certificates();
+    const ownA = await caA.issue('spiffe://example.org/mcp/fhir');
+    const ownB = await caB.issue('spiffe://example.org/mcp/fhir');
+    const peerA = await caA.issue(research);
+    const peerB = await caB.issue(research);
+    const overlap = { ...ownB, trustBundle: [...ownA.trustBundle, ...ownB.trustBundle] };
+    const { fetcher, port, transport } = await serverFor(ownA);
+    try {
+      const a = await stream(port, ownA, peerA);
+      let aClosed = false;
+      void a.closed.then(() => {
+        aClosed = true;
+      });
+      fetcher.update(overlap);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(aClosed).toBe(false);
+      const b = await stream(port, overlap, peerB);
+      let bClosed = false;
+      void b.closed.then(() => {
+        bClosed = true;
+      });
+      fetcher.update(ownB);
+      await a.closed;
+      await new Promise((r) => setTimeout(r, 100));
+      expect(bClosed).toBe(false);
+      expect(transport.isReady()).toBe(true);
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('closes every connection on rotation when rotation is close', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const { fetcher, port, transport } = await serverFor(own, undefined, { rotation: 'close' });
+    try {
+      const s = await stream(port, own, peer);
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      await s.closed;
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('closes drained connections when the update carries CRLs or on credential loss', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const { fetcher, port, transport } = await serverFor(own);
+    try {
+      const first = await stream(port, own, peer);
+      fetcher.update({ ...own, crls: [] });
+      await new Promise((r) => setTimeout(r, 50));
+      fetcher.loseStream();
+      await first.closed;
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('ends connections at the configured maximum age', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const { port, transport } = await serverFor(own, undefined, { maxConnectionAgeMs: 1000 });
+    try {
+      const started = Date.now();
+      const s = await stream(port, own, peer);
+      await s.closed;
+      expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+      expect(Date.now() - started).toBeLessThan(3000);
     } finally {
       await transport.stop();
     }

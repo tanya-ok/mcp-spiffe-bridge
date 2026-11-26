@@ -59,6 +59,8 @@ const transportSchema = z.object({
   mode: z.enum(['mtls-server', 'stdio-identity-only']),
   minTlsVersion: z.enum(['TLSv1.2', 'TLSv1.3']).optional(),
   crlScope: z.enum(['all-issuers', 'per-trust-domain']).optional(),
+  rotation: z.enum(['drain', 'close']).optional(),
+  maxConnectionAgeMs: z.number().int().min(1000).max(86_400_000).optional(),
   sse: z
     .object({
       host: z.string().min(1).optional(),

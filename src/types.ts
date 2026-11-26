@@ -289,8 +289,20 @@ export type MinTlsVersion = 'TLSv1.2' | 'TLSv1.3';
  */
 export type CrlScope = 'all-issuers' | 'per-trust-domain';
 
+/**
+ * What an SVID or bundle update does to established connections.
+ *  - `drain` (default): keep a connection only while its peer chain is still
+ *    valid against the new bundles and no CRLs are present; close the rest.
+ *  - `close`: close every connection on every update.
+ */
+export type RotationMode = 'drain' | 'close';
+
 export interface TransportOptions {
   readonly mode: TransportMode;
+  /** Default `drain`. */
+  readonly rotation?: RotationMode;
+  /** Upper bound on a connection's lifetime. Default 300000 (five minutes). */
+  readonly maxConnectionAgeMs?: number;
   /** Default `all-issuers`. */
   readonly crlScope?: CrlScope;
   /** Default `TLSv1.3`. Set `TLSv1.2` only for peers that cannot negotiate TLS 1.3. */
