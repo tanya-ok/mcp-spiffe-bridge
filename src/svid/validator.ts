@@ -16,6 +16,7 @@ import type {
   ValidatorOptions,
   X509Svid,
 } from '../types.js';
+import { verifyPathToAnchors } from './path.js';
 
 /**
  * Validator for peer X.509-SVIDs.
@@ -44,7 +45,7 @@ export class SpiffeValidator implements SvidValidator {
   async validate(
     peerCertDer: Uint8Array,
     now: Date = new Date(),
-    peerChainDer: readonly Uint8Array[] = [],
+    peerChainDer?: readonly Uint8Array[],
   ): Promise<ValidationResult> {
     let cert: X509Certificate;
     try {
@@ -79,12 +80,10 @@ export class SpiffeValidator implements SvidValidator {
         ),
       );
     }
-    if ((this.options.federatedTrustDomains?.length ?? 0) > 0) {
-      const anchors =
-        parsedId.trustDomain === own.spiffeId.trustDomain
-          ? own.trustBundle
-          : (own.federatedBundles?.get(parsedId.trustDomain) ?? []);
-      if (!chainsToAnchors(cert, peerChainDer, anchors)) {
+    const federated = this.options.federatedTrustDomains ?? [];
+    if (peerChainDer !== undefined || federated.length > 0) {
+      const anchors = anchorsFor(own, parsedId.trustDomain, federated);
+      if (!verifyPathToAnchors(peerCertDer, peerChainDer ?? [], anchors, now)) {
         return fail(
           new TrustDomainMismatchError(
             `peer chain does not lead to the trust bundle of ${parsedId.trustDomain}`,
@@ -163,7 +162,7 @@ export class SpiffeValidator implements SvidValidator {
  * Node returns SAN as a string like: `URI:spiffe://td/foo, DNS:example.com`.
  * SPIFFE mandates exactly one URI SAN containing the ID.
  */
-function extractSpiffeUriFromSan(san: string | undefined): string | null {
+export function extractSpiffeUriFromSan(san: string | undefined): string | null {
   if (!san) return null;
   const entries = san.split(',').map((s) => s.trim());
   const uris = entries.filter((e) => e.startsWith('URI:')).map((e) => e.slice('URI:'.length));
@@ -173,47 +172,18 @@ function extractSpiffeUriFromSan(san: string | undefined): string | null {
 }
 
 /**
- * True when `leaf` reaches one of `anchors` through signature-checked issuers
- * from `chain`. TLS has already validated the path against the combined trust
- * store; this binds the path to one trust domain's bundle.
+ * Anchors that may authenticate `trustDomain`: the local bundle for the local
+ * domain, or the federated bundle of a configured federated domain. Empty when
+ * the domain is not trusted.
  */
-function chainsToAnchors(
-  leaf: X509Certificate,
-  chain: readonly Uint8Array[],
-  anchors: readonly Uint8Array[],
-): boolean {
-  const roots = parseAll(anchors);
-  const issuers = parseAll(chain).filter((c) => c.ca);
-  const used = new Set<string>();
-  let current = leaf;
-  for (let depth = 0; depth < 10; depth++) {
-    if (roots.some((r) => r.raw.equals(current.raw) || issuedBy(current, r))) return true;
-    const next = issuers.find((i) => !used.has(i.fingerprint256) && issuedBy(current, i));
-    if (!next) return false;
-    used.add(next.fingerprint256);
-    current = next;
-  }
-  return false;
-}
-
-function issuedBy(cert: X509Certificate, issuer: X509Certificate): boolean {
-  try {
-    return cert.checkIssued(issuer) && cert.verify(issuer.publicKey);
-  } catch {
-    return false;
-  }
-}
-
-function parseAll(ders: readonly Uint8Array[]): X509Certificate[] {
-  const out: X509Certificate[] = [];
-  for (const der of ders) {
-    try {
-      out.push(new X509Certificate(Buffer.from(der)));
-    } catch {
-      /* An unparsable certificate cannot anchor or extend a chain. */
-    }
-  }
-  return out;
+export function anchorsFor(
+  own: X509Svid,
+  trustDomain: TrustDomainString,
+  federated: readonly TrustDomainString[],
+): readonly Uint8Array[] {
+  if (trustDomain === own.spiffeId.trustDomain) return own.trustBundle;
+  if (!federated.includes(trustDomain)) return [];
+  return own.federatedBundles?.get(trustDomain) ?? [];
 }
 
 function fail(

@@ -1,4 +1,4 @@
-import { constants, randomBytes, randomUUID } from 'node:crypto';
+import { constants, randomBytes, randomUUID, type X509Certificate } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as https from 'node:https';
 import type { Duplex } from 'node:stream';
@@ -8,9 +8,13 @@ import {
   buildAuthSuccessEvent,
   buildSvidRotatedEvent,
 } from '../audit/logger.js';
+import { parseSpiffeId } from '../spiffe-id.js';
+import { verifyPathToAnchors } from '../svid/path.js';
+import { anchorsFor, extractSpiffeUriFromSan } from '../svid/validator.js';
 import type {
   AuditBackgroundFailure,
   AuditLogger,
+  AuthError,
   MinTlsVersion,
   SpiffeAuditEvent,
   SvidFetcher,
@@ -287,7 +291,7 @@ export class MtlsTransportServer {
     if (!this.ready) throw new Error('credential state unavailable');
     if (this.auditFailed) throw new Error('audit unavailable');
     const epoch = this.credentialEpoch;
-    await this.opts.fetcher.getX509Svid();
+    const own = await this.opts.fetcher.getX509Svid();
     const requestId = randomUUID();
     // Node 17+: peer cert is exposed as X509Certificate via getPeerX509Certificate().
     const socket = req.socket as tls.TLSSocket;
@@ -300,7 +304,14 @@ export class MtlsTransportServer {
     }
 
     const peerDer = new Uint8Array(peerCert.raw);
-    const result = await this.opts.validator.validate(peerDer, undefined, peerIssuers(socket));
+    const issuers = peerIssuers(socket);
+    const unbound = this.bindToTrustDomain(peerCert, peerDer, issuers, own);
+    if (unbound) {
+      await this.opts.audit.log(buildAuthFailureEvent(unbound, { requestId }));
+      this.deny(res);
+      return;
+    }
+    const result = await this.opts.validator.validate(peerDer, undefined, issuers);
     if (!result.ok) {
       await this.opts.audit.log(buildAuthFailureEvent(result.error, { requestId }));
       this.deny(res);
@@ -319,6 +330,35 @@ export class MtlsTransportServer {
     await runWithCallContext({ caller: result.identity, requestId }, async () => {
       await this.handler?.(req, res, result.identity);
     });
+  }
+
+  /**
+   * Transport-level binding, independent of the configured validator: the peer
+   * must have one SPIFFE ID whose trust domain this listener trusts, and a
+   * fully valid path to that domain's anchors only.
+   */
+  private bindToTrustDomain(
+    peer: X509Certificate,
+    peerDer: Uint8Array,
+    issuers: readonly Uint8Array[],
+    own: X509Svid,
+  ): AuthError | null {
+    const raw = extractSpiffeUriFromSan(peer.subjectAltName);
+    const id = raw ? parseSpiffeId(raw) : null;
+    if (!id) {
+      return {
+        code: 'SVID_INVALID',
+        message: 'peer certificate has no valid SPIFFE ID',
+        observedSpiffeId: null,
+      };
+    }
+    const anchors = anchorsFor(own, id.trustDomain, this.federated);
+    if (verifyPathToAnchors(peerDer, issuers, anchors, new Date())) return null;
+    return {
+      code: 'TRUST_DOMAIN_MISMATCH',
+      message: `peer chain does not lead to the trust bundle of ${id.trustDomain}`,
+      observedSpiffeId: id.full,
+    };
   }
 
   private deny(res: ServerResponse): void {
