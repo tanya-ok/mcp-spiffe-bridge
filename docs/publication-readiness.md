@@ -98,7 +98,8 @@ remote CI was performed.
 ## Local verification - 2026-11-26
 
 Revision `288c092` on `feat/production-readiness`. Node v26.10.0, pnpm 12.14.0.
-`biome ci .` clean with no warnings, typecheck and build passed, 176 tests in
+`biome ci .` reported one formatting error in `biome.json` at that revision,
+fixed in `0e71a68` and clean afterwards with no warnings. Typecheck and build passed, 176 tests in
 14 files passed, and `pnpm run check:package` passed: 40 tarball entries, no
 source, tests or secrets, CommonJS and ESM consumers type-check and load.
 `scripts/verify-installed.mjs` passed against an independently installed
