@@ -392,4 +392,8 @@ export interface McpSpiffeBridge {
   start(): Promise<void>;
   /** Stop transports, close the Workload API stream, flush pending audit. */
   stop(): Promise<void>;
+  /** Readiness for probes: started, own SVID valid, audit sink healthy, listener ready. */
+  isReady(): boolean;
+  /** Resume serving after a background audit failure; fix the sink first. */
+  clearAuditFailure(): void;
 }
