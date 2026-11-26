@@ -36,15 +36,17 @@ Kubernetes gateway currently exits and lets Kubernetes restart it after stream l
 The library can recover without restarting when its host keeps it alive; see the
 [recovery and rotation policy](credential-lifecycle.md).
 
-The mTLS server requires a client certificate and a verified chain, then applies
-the SPIFFE caller allowlist and validity checks on every HTTP request. Its own
-credential must still be available before dispatch. TLS rotation updates the
-context for new connections and closes existing connections, including open
-streams and pending handshakes. Every connection also ends at the earlier of
-either certificate expiry or five minutes. Requests whose validation crosses a
-credential update cannot reach the handler. Listener failures unsubscribe rotation watchers, handler rejection
-returns a fixed 503 without exception text, and shutdown closes active HTTP
-connections. The minimum TLS version is 1.3 by default; set
+The mTLS server requires a client certificate and a verified chain, then binds
+the chain to the peer's own trust domain and applies the SPIFFE caller
+allowlist and validity checks on every HTTP request. Its own credential must
+still be available before dispatch. TLS rotation updates the context for new
+connections; with the default `drain` rotation, established connections stay
+only while their chain is still valid, and `close` closes them all. Every
+connection ends at the earliest of either certificate expiry and
+`transport.maxConnectionAgeMs` (default five minutes). Requests whose
+validation crosses a credential update get 503 and cannot reach the handler.
+Listener failures unsubscribe rotation watchers, handler rejection returns a
+fixed 503 without exception text, and shutdown closes active HTTP connections. The minimum TLS version is 1.3 by default; set
 `transport.minTlsVersion: 'TLSv1.2'` only for peers that cannot negotiate 1.3.
 Request and header deadlines are bounded.
 
@@ -57,9 +59,10 @@ Fetcher tests cover ended streams, expiry, rotation, timeout and terminal failed
 startup. The shared integration additionally exercises real SPIRE credentials,
 the official TypeScript MCP SDK and the FHIR tools in Kubernetes.
 
-This remains a prototype. Bounded stream reconnection and strict connection
-revocation are implemented and locally tested. Production operational policy and
-durable audit delivery remain outside the demonstrated scope.
+The shared Kubernetes lab predates federation, CRL scopes, the durable audit
+sink and drain rotation; those are exercised by the unit suite and the
+[SPIRE bench](spire-bench.md), not by this lab. Rerunning the lab against the
+current revision is an open item in [production readiness](production-readiness.md).
 
 ## Runtime convention
 
