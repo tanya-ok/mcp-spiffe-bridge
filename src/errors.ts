@@ -41,6 +41,10 @@ export class ConfigInvalidError extends SpiffeBridgeError {
   public readonly code = 'CONFIG_INVALID' as const;
 }
 
+export class AuditDeliveryError extends SpiffeBridgeError {
+  public readonly code = 'AUDIT_DELIVERY_FAILED' as const;
+}
+
 export class TransportError extends SpiffeBridgeError {
   public readonly code = 'TRANSPORT_ERROR' as const;
 }

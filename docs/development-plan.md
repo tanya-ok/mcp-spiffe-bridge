@@ -2,7 +2,14 @@
 
 Updated on 2026-10-06. The decision milestone now has a real consumer: the shared FHIR gateway uses this library with the official MCP SDK and actual SPIRE credentials in Lima/Kubernetes/containerd. Keep the component a small transport library, with the sibling authorization project owning orchestration and the FHIR project owning its domain tools.
 
-## Current integration and remaining work
+## Update on 2026-11-26
+
+Federation with per-trust-domain chain binding, experimental CRL scopes, a durable audit sink with a rate-limited handshake channel, unlimited Workload API reconnect, drain rotation, readiness, metrics hooks, a bounded and tested MCP SDK range and package verification are implemented and tested, including on a real two-domain [SPIRE bench](spire-bench.md). Remaining release gates are in [production readiness](production-readiness.md).
+
+!!! note "Superseded below"
+    The sections below are dated planning records. Where they call reconnect, revocation, federation, the SDK range or audit delivery missing or unbounded, they are superseded by the update above.
+
+## Integration and remaining work on 2026-10-06
 
 Local commit `2cbf610` added TLS transport and lifecycle tests, credential expiry/stream-loss refusal and request-local verified caller context. The local gate was freshly rerun on 2026-10-06: 56 tests, typecheck, lint and build passed, with nine pre-existing lint warnings. The shared eighteen-scenario integration and teardown were also freshly rerun that day, including allowed, disallowed and absent client certificates and audited FHIR calls. See the [integration and lifecycle guide](kubernetes-lab.md).
 

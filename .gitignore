@@ -17,3 +17,6 @@ coverage/
 /site/
 /.cache/
 AGENTS.local.md
+
+# SPIRE bench output
+deploy/spire-lab/work/

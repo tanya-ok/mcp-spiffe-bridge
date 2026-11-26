@@ -30,6 +30,30 @@ describe('validateBridgeOptions', () => {
     expect(() => validateBridgeOptions(bad)).toThrow(ConfigInvalidError);
   });
 
+  it.each([
+    [['partner.example.net'], true],
+    [['spiffe://partner.example.net'], false],
+    [['Partner.Example.Net'], false],
+    [[''], false],
+  ])('validates federatedTrustDomains %j', (domains, ok) => {
+    const input = {
+      ...validBase,
+      validator: { ...validBase.validator, federatedTrustDomains: domains },
+    };
+    if (ok) expect(validateBridgeOptions(input).validator.federatedTrustDomains).toEqual(domains);
+    else expect(() => validateBridgeOptions(input)).toThrow(ConfigInvalidError);
+  });
+
+  it.each([
+    ['fail-closed', true],
+    ['report', true],
+    ['ignore', false],
+  ])('validates audit.backgroundFailure %s', (policy, ok) => {
+    const input = { ...validBase, audit: { backgroundFailure: policy } };
+    if (ok) expect(validateBridgeOptions(input).audit?.backgroundFailure).toBe(policy);
+    else expect(() => validateBridgeOptions(input)).toThrow(ConfigInvalidError);
+  });
+
   it('rejects malformed caller matcher', () => {
     const bad = {
       ...validBase,
@@ -102,7 +126,7 @@ describe('validateBridgeOptions', () => {
   });
   it.each([
     { maxAttempts: -1 },
-    { maxAttempts: 101 },
+    { maxAttempts: 1.5 },
     { maxAttempts: 2, initialDelayMs: 0 },
     { maxAttempts: 2, initialDelayMs: 50, maxDelayMs: 10 },
   ])('refuses invalid reconnect limits %#', (reconnect) => {

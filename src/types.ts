@@ -39,8 +39,11 @@ export interface SpiffeId {
  * `certChain` is DER-encoded, leaf certificate first.
  * `privateKey` is PKCS#8 DER.
  * `trustBundle` holds CA certs for the issuer's own trust domain.
- * `federatedBundles` holds CA certs for other trust domains. They are parsed but
- * not trusted, because federation is unsupported.
+ * `federatedBundles` holds CA certs for other trust domains, keyed by trust
+ * domain name. They are trusted only for domains named in
+ * `ValidatorOptions.federatedTrustDomains`.
+ * `crls` holds DER certificate revocation lists from the Workload API. When
+ * present, the listener enforces them for every peer chain (see README).
  */
 export interface X509Svid {
   readonly spiffeId: SpiffeId;
@@ -50,6 +53,7 @@ export interface X509Svid {
   readonly notAfter: Date;
   readonly trustBundle: readonly Uint8Array[];
   readonly federatedBundles?: ReadonlyMap<TrustDomainString, readonly Uint8Array[]>;
+  readonly crls?: readonly Uint8Array[];
 }
 
 /**
@@ -78,7 +82,8 @@ export type SpiffeBridgeErrorCode =
   | 'WORKLOAD_API_CONNECTION_FAILED'
   | 'WORKLOAD_API_TIMEOUT'
   | 'CONFIG_INVALID'
-  | 'TRANSPORT_ERROR';
+  | 'TRANSPORT_ERROR'
+  | 'AUDIT_DELIVERY_FAILED';
 
 /** Minimal shape every SpiffeBridgeError instance satisfies. */
 export interface SpiffeBridgeErrorShape {
@@ -141,9 +146,15 @@ export interface SvidFetcher {
 export interface SvidValidator {
   /**
    * Validate a peer-presented certificate against the current trust bundle
-   * and configured allowlist. `now` override is for tests.
+   * and configured allowlist. `now` override is for tests. `peerChainDer`
+   * holds the issuers presented or verified by TLS, leaf excluded; it is
+   * required to accept federated peers.
    */
-  validate(peerCertDer: Uint8Array, now?: Date): Promise<ValidationResult>;
+  validate(
+    peerCertDer: Uint8Array,
+    now?: Date,
+    peerChainDer?: readonly Uint8Array[],
+  ): Promise<ValidationResult>;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -153,8 +164,12 @@ export interface SvidValidator {
 export type SpiffeAuditEventType = 'auth_success' | 'auth_failure' | 'tool_call' | 'svid_rotated';
 export type SpiffeAuditOutcome = 'allowed' | 'denied' | 'error';
 
-/** Exactly the audit shape declared in the spec. Field names kept snake_case for log compatibility. */
+/** Current audit event schema version; see docs/architecture/contracts/audit-event.md. */
+export const AUDIT_SCHEMA_VERSION = 1;
+
+/** Audit event, schema version 1. Field names are snake_case for log compatibility. */
 export interface SpiffeAuditEvent {
+  readonly schema_version: typeof AUDIT_SCHEMA_VERSION;
   readonly timestamp: string;
   readonly event_type: SpiffeAuditEventType;
   readonly caller_spiffe_id: string | null;
@@ -166,8 +181,29 @@ export interface SpiffeAuditEvent {
   readonly denial_reason: string | null;
 }
 
+/**
+ * Audit sink. A rejected or throwing `log()` for an authentication event
+ * refuses that request (fail closed). `close()`, when present, is awaited by
+ * `McpSpiffeBridge.stop()` after the listener stops.
+ */
 export interface AuditLogger {
   log(event: SpiffeAuditEvent): void | Promise<void>;
+  /**
+   * Optional channel for events from unauthenticated peers (TLS handshake
+   * denials). Must not throw or block; the sink may drop and count events.
+   * Without it, the listener rate-limits these events itself and calls `log`.
+   */
+  logUnauthenticated?(event: SpiffeAuditEvent): void;
+  /** Optional health; false makes `isReady()` false. */
+  healthy?(): boolean;
+  close?(): Promise<void>;
+}
+
+export interface AuditSinkStats {
+  readonly healthy: boolean;
+  readonly pending: number;
+  readonly droppedUnauthenticated: number;
+  readonly written: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -183,9 +219,13 @@ export interface WorkloadApiOptions {
   readonly socketPath: string;
   readonly connectTimeoutMs?: number;
   readonly rpcTimeoutMs?: number;
-  /** Consecutive reconnect budget; default 5, zero disables recovery. */
+  /**
+   * Reconnect policy. By default the fetcher retries without limit with capped
+   * exponential backoff and jitter; readiness stays false until a fresh SVID
+   * arrives. `maxAttempts` bounds consecutive retries; zero disables recovery.
+   */
   readonly reconnect?: {
-    readonly maxAttempts: number;
+    readonly maxAttempts?: number;
     readonly initialDelayMs?: number;
     readonly maxDelayMs?: number;
   };
@@ -196,10 +236,18 @@ export interface ValidatorOptions {
   /** Reject SVIDs whose remaining lifetime is below this bound. */
   readonly minTtlSeconds: number;
   /**
-   * Optional pin of the local trust domain. Federation is unsupported: naming
-   * any other trust domain makes `start()` fail with `ConfigInvalidError`.
+   * Optional pin of the accepted trust domains. Each entry must be the local
+   * trust domain or listed in `federatedTrustDomains`, otherwise `start()`
+   * fails with `ConfigInvalidError`.
    */
   readonly allowedTrustDomains?: readonly TrustDomainString[];
+  /**
+   * Foreign trust domains to trust through Workload API federated bundles.
+   * Default none. A listed domain is trusted only while the agent supplies
+   * its bundle, and a peer must chain to the bundle of the trust domain in
+   * its own SPIFFE ID. Callers still need a matching `allowedCallers` entry.
+   */
+  readonly federatedTrustDomains?: readonly TrustDomainString[];
 }
 
 /**
@@ -230,8 +278,33 @@ export type TransportMode = 'mtls-server' | 'stdio-identity-only';
 /** Lowest TLS version the mTLS listener accepts. */
 export type MinTlsVersion = 'TLSv1.2' | 'TLSv1.3';
 
+/**
+ * How Workload API CRLs are enforced.
+ *  - `all-issuers` (default): OpenSSL checks revocation at the handshake. When
+ *    any CRL is present, every issuer in every peer chain needs a current CRL,
+ *    so federated callers are refused unless their domain also publishes CRLs.
+ *  - `per-trust-domain`: the listener checks revocation per request and only
+ *    for trust domains that publish CRLs; within such a domain every issuer on
+ *    the path needs a current CRL. Experimental.
+ */
+export type CrlScope = 'all-issuers' | 'per-trust-domain';
+
+/**
+ * What an SVID or bundle update does to established connections.
+ *  - `drain` (default): keep a connection only while its peer chain is still
+ *    valid against the new bundles and no CRLs are present; close the rest.
+ *  - `close`: close every connection on every update.
+ */
+export type RotationMode = 'drain' | 'close';
+
 export interface TransportOptions {
   readonly mode: TransportMode;
+  /** Default `drain`. */
+  readonly rotation?: RotationMode;
+  /** Upper bound on a connection's lifetime. Default 300000 (five minutes). */
+  readonly maxConnectionAgeMs?: number;
+  /** Default `all-issuers`. */
+  readonly crlScope?: CrlScope;
   /** Default `TLSv1.3`. Set `TLSv1.2` only for peers that cannot negotiate TLS 1.3. */
   readonly minTlsVersion?: MinTlsVersion;
   readonly sse?: {
@@ -241,11 +314,48 @@ export interface TransportOptions {
   };
 }
 
+/**
+ * Policy for audit events that have no request to refuse: TLS handshake
+ * denials and SVID rotation.
+ *  - `fail-closed`: a failed write closes connections, refuses new ones and
+ *    makes `isReady()` false until `clearAuditFailure()` is called.
+ *  - `report`: write a line to stderr and keep serving.
+ */
+export type AuditBackgroundFailure = 'fail-closed' | 'report';
+
+export interface AuditOptions {
+  readonly logger?: AuditLogger;
+  /** Default `fail-closed`. */
+  readonly backgroundFailure?: AuditBackgroundFailure;
+}
+
+export type BridgeCounter =
+  | 'handshake_accepted'
+  | 'handshake_refused'
+  | 'request_authorized'
+  | 'request_refused'
+  | 'audit_dropped'
+  | 'svid_rotated'
+  | 'workload_api_reconnect';
+
+export type BridgeHistogram = 'request_auth_seconds';
+
+/**
+ * Optional metrics hooks with no library dependency. Implementations must be
+ * cheap and must not throw; thrown errors are ignored. `reason` labels use the
+ * vocabulary in docs/architecture/contracts/audit-event.md.
+ */
+export interface BridgeMetrics {
+  increment?(name: BridgeCounter, labels?: Readonly<Record<string, string>>): void;
+  observe?(name: BridgeHistogram, value: number, labels?: Readonly<Record<string, string>>): void;
+}
+
 export interface BridgeOptions {
   readonly workloadApi: WorkloadApiOptions;
   readonly validator: ValidatorOptions;
   readonly transport: TransportOptions;
-  readonly audit?: { readonly logger?: AuditLogger };
+  readonly audit?: AuditOptions;
+  readonly metrics?: BridgeMetrics;
   readonly degrade?: DegradeOptions;
 }
 
@@ -282,4 +392,8 @@ export interface McpSpiffeBridge {
   start(): Promise<void>;
   /** Stop transports, close the Workload API stream, flush pending audit. */
   stop(): Promise<void>;
+  /** Readiness for probes: started, own SVID valid, audit sink healthy, listener ready. */
+  isReady(): boolean;
+  /** Resume serving after a background audit failure; fix the sink first. */
+  clearAuditFailure(): void;
 }

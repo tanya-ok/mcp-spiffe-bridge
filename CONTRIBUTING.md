@@ -18,8 +18,8 @@ lefthook install   # pre-commit: biome on staged files and a staged gitleaks sca
 - Synthetic identities, certificates and data only. Never commit keys, tokens
   or real trust bundles.
 - Biome is the only linter and formatter.
-- Commits use `type: Capitalized subject` with one of feat, fix, docs, ci,
-  chore, refactor, test, security, perf.
+- Commits use `type: Capitalized subject` or `type(scope): Capitalized subject`
+  with one of feat, fix, docs, ci, chore, refactor, test, security, perf.
 - Never bypass hooks.
 
 ## Before a pull request
@@ -29,7 +29,11 @@ pnpm exec biome ci .
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm run check:package
 ```
 
-Update the docs when behavior changes and check them with
-`zensical build --strict` (see `requirements-docs.txt`).
+Changes to federation, rotation, readiness or audit delivery should also pass
+the real SPIRE bench, `pnpm run bench:spire` (Lima, see
+[docs/spire-bench.md](docs/spire-bench.md)). Update the docs when behavior
+changes and check them with `zensical build --strict` (see
+`requirements-docs.txt`).

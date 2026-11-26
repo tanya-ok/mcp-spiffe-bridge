@@ -2,6 +2,13 @@
 
 **Pending maintainer review. No installation or execution evidence is included.**
 
+!!! note "Evidence surfaces superseded"
+    The table lists test files at the prepared base revision. Later revisions
+    add `tests/path.test.ts`, `tests/path-attack.test.ts`,
+    `tests/federation.test.ts`, `tests/crl.test.ts`, `tests/crl-scope.test.ts`,
+    `tests/file-sink.test.ts`, `tests/mcp-sdk.test.ts` and the SPIRE bench in
+    `deploy/spire-lab/`. Re-derive the surfaces before review.
+
 Scope: Node-only synthetic mTLS/SVID validation, credential refresh and safe transport audit; no deployment, Google identity or Python runtime installation.
 
 Prepared base: `70e9ae0157cc7c242478114d4f01af39a9dfb3da`.

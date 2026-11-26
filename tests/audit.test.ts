@@ -27,6 +27,7 @@ describe('audit event builders', () => {
   it('buildAuthSuccessEvent fills every required field', () => {
     const ev = buildAuthSuccessEvent(makeIdentity(), { requestId: REQUEST_ID, now: NOW });
     expect(ev).toEqual({
+      schema_version: 1,
       timestamp: NOW.toISOString(),
       event_type: 'auth_success',
       caller_spiffe_id: 'spiffe://prod.example.org/svc/payment',

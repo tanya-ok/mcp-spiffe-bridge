@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ConfigInvalidError } from './errors.js';
+import { isValidCallerMatcher } from './spiffe-id.js';
 import type { BridgeOptions } from './types.js';
 
 // A caller-matcher is a SPIFFE-ID or glob of one. We don't fully parse it
@@ -8,8 +9,11 @@ import type { BridgeOptions } from './types.js';
 const callerMatcherSchema = z
   .string()
   .min(1)
-  .regex(/^spiffe:\/\/[a-z0-9._*-]+(\/[A-Za-z0-9._~!$&'()*+,;=:@*-]+)*$/, {
-    message: 'must look like `spiffe://<trust-domain>/<path>` (wildcards `*` and `**` allowed)',
+  .regex(/^spiffe:\/\/[a-z0-9._-]+(\/[A-Za-z0-9._~!$&'()*+,;=:@*-]+)*$/, {
+    message: 'must look like `spiffe://<trust-domain>/<path>` with an exact trust domain',
+  })
+  .refine(isValidCallerMatcher, {
+    message: 'wildcards need at least one literal path segment',
   });
 
 const socketPathSchema = z
@@ -25,7 +29,7 @@ const workloadApiSchema = z.object({
   rpcTimeoutMs: z.number().int().positive().optional(),
   reconnect: z
     .object({
-      maxAttempts: z.number().int().min(0).max(100),
+      maxAttempts: z.number().int().min(0).optional(),
       initialDelayMs: z.number().int().min(1).max(60_000).optional(),
       maxDelayMs: z.number().int().min(1).max(60_000).optional(),
     })
@@ -42,11 +46,21 @@ const validatorSchema = z.object({
   }),
   minTtlSeconds: z.number().int().nonnegative(),
   allowedTrustDomains: z.array(z.string().min(1)).optional(),
+  federatedTrustDomains: z
+    .array(
+      z.string().regex(/^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/, {
+        message: 'must be a bare trust domain name such as `partner.example.org`',
+      }),
+    )
+    .optional(),
 });
 
 const transportSchema = z.object({
   mode: z.enum(['mtls-server', 'stdio-identity-only']),
   minTlsVersion: z.enum(['TLSv1.2', 'TLSv1.3']).optional(),
+  crlScope: z.enum(['all-issuers', 'per-trust-domain']).optional(),
+  rotation: z.enum(['drain', 'close']).optional(),
+  maxConnectionAgeMs: z.number().int().min(1000).max(86_400_000).optional(),
   sse: z
     .object({
       host: z.string().min(1).optional(),
@@ -64,6 +78,7 @@ const degradeSchema = z.object({
 const auditSchema = z.object({
   // logger is a function/object, not JSON-serializable; we pass it through as unknown.
   logger: z.unknown().optional(),
+  backgroundFailure: z.enum(['fail-closed', 'report']).optional(),
 });
 
 const bridgeOptionsSchema = z.object({
@@ -72,6 +87,8 @@ const bridgeOptionsSchema = z.object({
   transport: transportSchema,
   audit: auditSchema.optional(),
   degrade: degradeSchema.optional(),
+  // metrics hooks are functions, not JSON config.
+  metrics: z.unknown().optional(),
 });
 
 /**
@@ -96,7 +113,7 @@ export function validateBridgeOptions(input: unknown): BridgeOptions {
       'transport.mode = "mtls-server" requires transport.sse.{host,port}',
     );
   }
-  const opaque = new Set<unknown>([v.audit?.logger, v.degrade?.fakeSvid]);
+  const opaque = new Set<unknown>([v.audit?.logger, v.degrade?.fakeSvid, v.metrics]);
   return deepFreeze(v, opaque) as unknown as BridgeOptions;
 }
 

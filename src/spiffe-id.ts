@@ -83,7 +83,25 @@ export function matchesAllowlist(id: SpiffeId, matchers: readonly CallerMatcher[
   return false;
 }
 
+/**
+ * A matcher must name an exact trust domain (no wildcard), and a wildcard
+ * matcher must keep at least one literal path segment, so a whole trust domain
+ * can never be allowed by a pattern such as `**` alone.
+ */
+export function isValidCallerMatcher(matcher: string): boolean {
+  if (!matcher.startsWith(SPIFFE_SCHEME)) return false;
+  const rest = matcher.slice(SPIFFE_SCHEME.length);
+  const slash = rest.indexOf('/');
+  const td = slash === -1 ? rest : rest.slice(0, slash);
+  if (!TRUST_DOMAIN_RE.test(td)) return false;
+  const path = slash === -1 ? '' : rest.slice(slash);
+  if (!path.includes('*')) return true;
+  const segments = path.slice(1).split('/');
+  return segments.some((seg) => seg.length > 0 && !seg.includes('*'));
+}
+
 function matchesOne(idFull: string, matcher: string): boolean {
+  if (!isValidCallerMatcher(matcher)) return false;
   if (!matcher.includes('*')) {
     return idFull === matcher;
   }

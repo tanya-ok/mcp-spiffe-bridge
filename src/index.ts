@@ -1,10 +1,12 @@
 // ─── Public API: factory + types ────────────────────────────────────────
 
+export { FileAuditLogger, type FileAuditLoggerOptions } from './audit/file-sink.js';
 export { StdoutJsonAuditLogger } from './audit/logger.js';
 export { createMcpSpiffeBridge, McpSpiffeBridgeImpl } from './bridge.js';
 export { validateBridgeOptions } from './config.js';
 // ─── Errors ─────────────────────────────────────────────────────────────
 export {
+  AuditDeliveryError,
   ConfigInvalidError,
   isAuthError,
   isSpiffeBridgeError,
@@ -19,7 +21,12 @@ export {
   WorkloadApiConnectionError,
   WorkloadApiTimeoutError,
 } from './errors.js';
-export { matchesAllowlist, parseSpiffeId, spiffeIdEquals } from './spiffe-id.js';
+export {
+  isValidCallerMatcher,
+  matchesAllowlist,
+  parseSpiffeId,
+  spiffeIdEquals,
+} from './spiffe-id.js';
 export { WorkloadApiSvidFetcher } from './svid/fetcher.js';
 export { SpiffeValidator } from './svid/validator.js';
 export {
@@ -33,17 +40,24 @@ export {
   MtlsTransportServer,
   type MtlsTransportServerOptions,
 } from './transport/mtls.js';
-
 // ─── Types (type-only re-exports) ───────────────────────────────────────
 export type {
+  AuditBackgroundFailure,
   AuditLogger,
+  AuditOptions,
+  AuditSinkStats,
   AuthError,
+  BridgeCounter,
+  BridgeHistogram,
+  BridgeMetrics,
   BridgeOptions,
   CallerMatcher,
+  CrlScope,
   DegradeMode,
   DegradeOptions,
   McpSpiffeBridge,
   MinTlsVersion,
+  RotationMode,
   SpiffeAuditEvent,
   SpiffeAuditEventType,
   SpiffeAuditOutcome,
@@ -64,3 +78,4 @@ export type {
   WorkloadApiOptions,
   X509Svid,
 } from './types.js';
+export { AUDIT_SCHEMA_VERSION } from './types.js';

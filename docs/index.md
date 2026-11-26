@@ -38,9 +38,10 @@ flowchart TB
     class N limit
 ```
 
-[Demo guide](kubernetes-lab.md){ .overview-link }
+[Operations](operations.md){ .overview-link }
+[SPIRE bench](spire-bench.md){ .overview-link }
 [Certificate lifecycle](credential-lifecycle.md){ .overview-link }
-[Readiness and limits](publication-readiness.md){ .overview-link }
+[Production readiness](production-readiness.md){ .overview-link }
 
 !!! note "Scope"
-    Local review only; not published yet. Tool permissions remain a separate OAuth boundary.
+    Authentication only; not published to npm yet. Tool permissions remain a separate OAuth boundary.

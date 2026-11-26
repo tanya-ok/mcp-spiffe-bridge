@@ -1,8 +1,12 @@
 import { randomUUID, webcrypto } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as https from 'node:https';
 import * as net from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as x509 from '@peculiar/x509';
 import { describe, expect, it, vi } from 'vitest';
+import { FileAuditLogger } from '../src/audit/file-sink.js';
 import { parseSpiffeId } from '../src/spiffe-id.js';
 import { SpiffeValidator } from '../src/svid/validator.js';
 import { getCallerIdentity } from '../src/transport/context.js';
@@ -282,7 +286,11 @@ async function stream(
   });
 }
 
-async function serverFor(own: X509Svid, minTlsVersion?: 'TLSv1.2' | 'TLSv1.3') {
+async function serverFor(
+  own: X509Svid,
+  minTlsVersion?: 'TLSv1.2' | 'TLSv1.3',
+  extra: { rotation?: 'drain' | 'close'; maxConnectionAgeMs?: number } = {},
+) {
   const fetcher = new MutableFetcher(own);
   const port = await freePort();
   const audit = { log: vi.fn() };
@@ -294,6 +302,7 @@ async function serverFor(own: X509Svid, minTlsVersion?: 'TLSv1.2' | 'TLSv1.3') {
       mode: 'mtls-server',
       sse: { host: '127.0.0.1', port },
       ...(minTlsVersion ? { minTlsVersion } : {}),
+      ...extra,
     },
   });
   transport.setAuthorizedHandler((_req, res) => {
@@ -303,6 +312,24 @@ async function serverFor(own: X509Svid, minTlsVersion?: 'TLSv1.2' | 'TLSv1.3') {
   await transport.start();
   return { fetcher, port, transport, audit };
 }
+
+describe('readiness', () => {
+  it('reports ready only while bound with usable credentials', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const { fetcher, transport } = await serverFor(own);
+    try {
+      expect(transport.isReady()).toBe(true);
+      fetcher.loseStream();
+      expect(transport.isReady()).toBe(false);
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      expect(transport.isReady()).toBe(true);
+    } finally {
+      await transport.stop();
+    }
+    expect(transport.isReady()).toBe(false);
+  });
+});
 
 describe('root rotation and established connection policy', () => {
   it.each(['TLSv1.2', 'TLSv1.3'] as const)(
@@ -315,7 +342,9 @@ describe('root rotation and established connection policy', () => {
       const peerA = await caA.issue(research);
       const peerB = await caB.issue(research);
       const overlap = { ...ownB, trustBundle: [...ownA.trustBundle, ...ownB.trustBundle] };
-      const { fetcher, port, transport, audit } = await serverFor(ownA, version);
+      const { fetcher, port, transport, audit } = await serverFor(ownA, version, {
+        rotation: 'close',
+      });
       try {
         const old = await stream(port, ownA, peerA);
         fetcher.update(overlap);
@@ -491,13 +520,13 @@ describe('root rotation and established connection policy', () => {
     transport.setAuthorizedHandler(handler);
     try {
       const pending = request(port, own, peer).then(
-        () => false,
-        () => true,
+        (r) => r.status,
+        () => 'closed' as const,
       );
       await validating;
       fetcher.update(own);
       release();
-      expect(await pending).toBe(true);
+      expect([503, 'closed']).toContain(await pending);
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(handler).not.toHaveBeenCalled();
       validation.mockRestore();
@@ -526,6 +555,332 @@ describe('root rotation and established connection policy', () => {
       expect((await request(port, own, peer)).status).toBe(200);
     } finally {
       stderr.mockRestore();
+      await transport.stop();
+    }
+  });
+
+  it('refuses the request with 503 when the audit sink rejects', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const intruder = await ca.issue('spiffe://example.org/agent/intruder');
+    const port = await freePort();
+    const fetcher: SvidFetcher = {
+      getX509Svid: async () => own,
+      watchSvids: () => () => {},
+      close: async () => {},
+    };
+    const audit = { log: vi.fn(async () => Promise.reject(new Error('disk full'))) };
+    const handler = vi.fn((_req: unknown, res: import('node:http').ServerResponse) => {
+      res.end('served');
+    });
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit,
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    transport.setAuthorizedHandler(handler);
+    await transport.start();
+    try {
+      expect(await request(port, own, peer)).toEqual({
+        status: 503,
+        body: '{"error":"service_unavailable"}',
+      });
+      expect((await request(port, own, intruder)).status).toBe(503);
+      expect(handler).not.toHaveBeenCalled();
+      audit.log.mockResolvedValue(undefined);
+      expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('keeps serving and counts drops when handshake-denial audit fails', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const foreign = await (await certificates()).issue(research);
+    const port = await freePort();
+    const fetcher: SvidFetcher = {
+      getX509Svid: async () => own,
+      watchSvids: () => () => {},
+      close: async () => {},
+    };
+    const audit = {
+      log: vi.fn(async (event: { event_type: string; caller_spiffe_id: string | null }) => {
+        if (event.event_type === 'auth_failure' && event.caller_spiffe_id === null) {
+          throw new Error('disk full');
+        }
+      }),
+    };
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit,
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    transport.setAuthorizedHandler((_req, res) => res.end('served'));
+    await transport.start();
+    try {
+      await expect(request(port, own, foreign)).rejects.toThrow();
+      await vi.waitFor(() => expect(transport.stats().droppedHandshakeAudit).toBe(1));
+      expect(transport.isReady()).toBe(true);
+      expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('keeps authenticated audit available during a handshake-denial flood', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const port = await freePort();
+    const dir = await mkdtemp(join(tmpdir(), 'bridge-flood-'));
+    const sink = new FileAuditLogger({
+      path: join(dir, 'audit.jsonl'),
+      maxQueue: 2,
+      unauthenticatedPerSecond: 3,
+      maxUnauthenticatedQueue: 2,
+    });
+    const fetcher: SvidFetcher = {
+      getX509Svid: async () => own,
+      watchSvids: () => () => {},
+      close: async () => {},
+    };
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit: sink,
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    transport.setAuthorizedHandler((_req, res) => res.end('served'));
+    await transport.start();
+    try {
+      await Promise.all(
+        Array.from({ length: 40 }, () => request(port, own).catch(() => undefined)),
+      );
+      expect(await request(port, own, peer)).toEqual({ status: 200, body: 'served' });
+      expect(sink.stats().droppedUnauthenticated).toBeGreaterThan(30);
+      expect(transport.isReady()).toBe(true);
+    } finally {
+      await transport.stop();
+      await sink.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports not ready while the audit sink is unhealthy or the own SVID expired', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const port = await freePort();
+    let healthy = true;
+    const fetcher = new MutableFetcher(own);
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit: { log: vi.fn(), healthy: () => healthy },
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    await transport.start();
+    try {
+      expect(transport.isReady()).toBe(true);
+      healthy = false;
+      expect(transport.isReady()).toBe(false);
+      healthy = true;
+      const now = vi.spyOn(Date, 'now').mockReturnValue(own.notAfter.getTime() + 1);
+      expect(transport.isReady()).toBe(false);
+      now.mockRestore();
+      expect(transport.isReady()).toBe(true);
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('keeps serving after a failed background audit with policy report', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const fetcher = new MutableFetcher(own);
+    const port = await freePort();
+    const audit = {
+      log: vi.fn((event: { event_type: string }) => {
+        if (event.event_type === 'svid_rotated') throw new Error('sync failure');
+      }),
+    };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit,
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+      auditBackgroundFailure: 'report',
+    });
+    transport.setAuthorizedHandler((_req, res) => res.end('served'));
+    await transport.start();
+    try {
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      await vi.waitFor(() =>
+        expect(stderr).toHaveBeenCalledWith('bridge: rotation audit unavailable\n'),
+      );
+      expect(transport.isAuditFailed()).toBe(false);
+      expect(transport.isReady()).toBe(true);
+      expect(await request(port, fetcher.current, peer)).toEqual({ status: 200, body: 'served' });
+    } finally {
+      stderr.mockRestore();
+      await transport.stop();
+    }
+  });
+
+  it('fails closed on a synchronous rotation audit throw by default', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const fetcher = new MutableFetcher(own);
+    const port = await freePort();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit: {
+        log: (event) => {
+          if (event.event_type === 'svid_rotated') throw new Error('sync failure');
+        },
+      },
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+    });
+    await transport.start();
+    try {
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      await vi.waitFor(() => expect(transport.isAuditFailed()).toBe(true));
+      expect(transport.isReady()).toBe(false);
+    } finally {
+      stderr.mockRestore();
+      await transport.stop();
+    }
+  });
+
+  it('reports handshake, request and audit metrics without affecting outcomes', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const intruder = await ca.issue('spiffe://example.org/agent/intruder');
+    const port = await freePort();
+    const fetcher = new MutableFetcher(own);
+    const counts = new Map<string, number>();
+    const observed: string[] = [];
+    const metrics = {
+      increment: (name: string, labels?: Readonly<Record<string, string>>) => {
+        const key = labels ? `${name}{${Object.values(labels).join(',')}}` : name;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        if (name === 'request_refused') throw new Error('broken metrics backend');
+      },
+      observe: (_name: string, _value: number, labels?: Readonly<Record<string, string>>) => {
+        observed.push(labels?.outcome ?? '');
+      },
+    };
+    const transport = new MtlsTransportServer({
+      fetcher,
+      validator: new SpiffeValidator({ allowedCallers: [research], minTtlSeconds: 5 }, fetcher),
+      audit: { log: vi.fn() },
+      transport: { mode: 'mtls-server', sse: { host: '127.0.0.1', port } },
+      metrics,
+    });
+    transport.setAuthorizedHandler((_req, res) => res.end('served'));
+    await transport.start();
+    try {
+      expect((await request(port, own, peer)).status).toBe(200);
+      expect((await request(port, own, intruder)).status).toBe(401);
+      await expect(request(port, own)).rejects.toThrow();
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      await vi.waitFor(() =>
+        expect(counts.get('handshake_refused{no_client_certificate}')).toBe(1),
+      );
+      expect(counts.get('handshake_accepted')).toBe(2);
+      expect(counts.get('request_authorized')).toBe(1);
+      expect(counts.get('request_refused{spiffe_id_disallowed}')).toBe(1);
+      expect(counts.get('svid_rotated')).toBe(1);
+      expect(observed.sort()).toEqual(['allowed', 'denied']);
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('drains: keeps a stream whose chain stays valid and closes one whose root was removed', async () => {
+    const caA = await certificates();
+    const caB = await certificates();
+    const ownA = await caA.issue('spiffe://example.org/mcp/fhir');
+    const ownB = await caB.issue('spiffe://example.org/mcp/fhir');
+    const peerA = await caA.issue(research);
+    const peerB = await caB.issue(research);
+    const overlap = { ...ownB, trustBundle: [...ownA.trustBundle, ...ownB.trustBundle] };
+    const { fetcher, port, transport } = await serverFor(ownA);
+    try {
+      const a = await stream(port, ownA, peerA);
+      let aClosed = false;
+      void a.closed.then(() => {
+        aClosed = true;
+      });
+      fetcher.update(overlap);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(aClosed).toBe(false);
+      const b = await stream(port, overlap, peerB);
+      let bClosed = false;
+      void b.closed.then(() => {
+        bClosed = true;
+      });
+      fetcher.update(ownB);
+      await a.closed;
+      await new Promise((r) => setTimeout(r, 100));
+      expect(bClosed).toBe(false);
+      expect(transport.isReady()).toBe(true);
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('closes every connection on rotation when rotation is close', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const { fetcher, port, transport } = await serverFor(own, undefined, { rotation: 'close' });
+    try {
+      const s = await stream(port, own, peer);
+      fetcher.update(await ca.issue('spiffe://example.org/mcp/fhir'));
+      await s.closed;
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('closes drained connections when the update carries CRLs or on credential loss', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const { fetcher, port, transport } = await serverFor(own);
+    try {
+      const first = await stream(port, own, peer);
+      fetcher.update({ ...own, crls: [] });
+      await new Promise((r) => setTimeout(r, 50));
+      fetcher.loseStream();
+      await first.closed;
+    } finally {
+      await transport.stop();
+    }
+  });
+
+  it('ends connections at the configured maximum age', async () => {
+    const ca = await certificates();
+    const own = await ca.issue('spiffe://example.org/mcp/fhir');
+    const peer = await ca.issue(research);
+    const { port, transport } = await serverFor(own, undefined, { maxConnectionAgeMs: 1000 });
+    try {
+      const started = Date.now();
+      const s = await stream(port, own, peer);
+      await s.closed;
+      expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+      expect(Date.now() - started).toBeLessThan(3000);
+    } finally {
       await transport.stop();
     }
   });

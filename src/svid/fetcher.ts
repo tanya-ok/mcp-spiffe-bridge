@@ -1,12 +1,15 @@
 import { createPrivateKey, X509Certificate } from 'node:crypto';
+import { createSecureContext } from 'node:tls';
 import { createClient, parseCertificate, parseCertificateBundle } from 'spiffe';
 import {
   SvidUnavailableError,
   WorkloadApiConnectionError,
   WorkloadApiTimeoutError,
 } from '../errors.js';
+import { Metrics } from '../metrics.js';
 import { parseSpiffeId } from '../spiffe-id.js';
 import type {
+  BridgeMetrics,
   SvidFetcher,
   SvidWatcher,
   TrustDomainString,
@@ -46,7 +49,13 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
   private closed = false;
   private streamFailure: Error | null = null;
 
-  constructor(private readonly options: WorkloadApiOptions) {
+  private readonly metrics: Metrics;
+
+  constructor(
+    private readonly options: WorkloadApiOptions,
+    hooks?: { readonly metrics?: BridgeMetrics },
+  ) {
+    this.metrics = new Metrics(hooks?.metrics);
     const baseUrl = normalizeSocketUrl(options.socketPath);
     this.client = createClient(baseUrl);
     this.firstMessageDeferred = deferred<X509Svid>();
@@ -129,7 +138,7 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
   }
 
   private async runWithReconnect(): Promise<void> {
-    const maxAttempts = this.options.reconnect?.maxAttempts ?? 5;
+    const maxAttempts = this.options.reconnect?.maxAttempts ?? Number.POSITIVE_INFINITY;
     const initialDelay = this.options.reconnect?.initialDelayMs ?? 250;
     const maxDelay = this.options.reconnect?.maxDelayMs ?? 5000;
     while (!this.closed) {
@@ -139,8 +148,11 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
         if (!this.closed) this.invalidate(error);
       }
       if (this.closed || this.retries >= maxAttempts) return;
-      const delay = Math.min(initialDelay * 2 ** this.retries, maxDelay);
+      const cap = Math.min(initialDelay * 2 ** Math.min(this.retries, 30), maxDelay);
+      // Equal jitter: spread reconnects of many workloads without exceeding the cap.
+      const delay = cap / 2 + Math.random() * (cap / 2);
       this.retries++;
+      this.metrics.increment('workload_api_reconnect');
       await abortableDelay(delay, this.abortController.signal);
     }
   }
@@ -206,7 +218,14 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
     federatedBundles: { [key: string]: Uint8Array };
     crl?: Uint8Array[];
   }): X509Svid | null {
-    if (response.crl?.length) throw new SvidUnavailableError('Workload API CRLs are not supported');
+    const crls = (response.crl ?? []).map((c) => new Uint8Array(c));
+    if (crls.length > 0) {
+      try {
+        createSecureContext({ crl: crls.map((c) => derToPem('X509 CRL', c)) });
+      } catch (err) {
+        throw new SvidUnavailableError('Workload API returned an invalid CRL', { cause: err });
+      }
+    }
     const first = response.svids[0];
     if (!first) return null;
 
@@ -246,11 +265,14 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
     const federatedEntries = Object.entries(response.federatedBundles);
     if (federatedEntries.length > 0) {
       const m = new Map<TrustDomainString, readonly Uint8Array[]>();
-      for (const [td, bytes] of federatedEntries) {
+      for (const [key, bytes] of federatedEntries) {
+        // The Workload API keys bundles by trust domain ID (`spiffe://td`); accept bare names too.
+        const td = parseSpiffeId(key.startsWith('spiffe://') ? key : `spiffe://${key}`);
+        if (td?.path !== '' || td.trustDomain === parsedId.trustDomain) continue;
         const parsed = parseCertificateBundle(bytes).map((c) => new Uint8Array(c.rawData));
-        m.set(td as TrustDomainString, parsed);
+        if (parsed.length > 0) m.set(td.trustDomain, parsed);
       }
-      federated = m;
+      if (m.size > 0) federated = m;
     }
 
     const svid: X509Svid = {
@@ -261,12 +283,18 @@ export class WorkloadApiSvidFetcher implements SvidFetcher {
       notAfter: leaf.notAfter,
       trustBundle,
       ...(federated ? { federatedBundles: federated } : {}),
+      ...(crls.length > 0 ? { crls } : {}),
     };
     return svid;
   }
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────
+
+function derToPem(label: string, der: Uint8Array): string {
+  const b64 = Buffer.from(der).toString('base64');
+  return `-----BEGIN ${label}-----\n${b64.match(/.{1,64}/g)?.join('\n') ?? b64}\n-----END ${label}-----`;
+}
 
 function normalizeSocketUrl(socketPath: string): string {
   if (socketPath.startsWith('unix://')) return socketPath;

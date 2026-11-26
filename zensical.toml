@@ -10,10 +10,14 @@ site_dir = "site"
 extra_css = ["assets/overview.css"]
 nav = [
   { "Home" = "index.md" },
+  { "Operations" = "operations.md" },
   { "Installed demo" = "installed-demo.md" },
+  { "SPIRE bench" = "spire-bench.md" },
   { "Certificate lifecycle" = "credential-lifecycle.md" },
   { "Lab guide" = "kubernetes-lab.md" },
+  { "Audit event contract" = "architecture/contracts/audit-event.md" },
   { "For maintainers" = [
+  { "Production readiness" = "production-readiness.md" },
   { "Publication readiness" = "publication-readiness.md" },
   { "Development plan" = "development-plan.md" },
 ] },

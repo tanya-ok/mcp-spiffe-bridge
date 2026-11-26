@@ -14,7 +14,9 @@ import type {
   TrustDomainString,
   ValidationResult,
   ValidatorOptions,
+  X509Svid,
 } from '../types.js';
+import { verifyPathToAnchors } from './path.js';
 
 /**
  * Validator for peer X.509-SVIDs.
@@ -23,7 +25,9 @@ import type {
  *   1. Cert parses.
  *   2. Subject Alternative Name contains exactly one `URI:spiffe://…` entry.
  *   3. SPIFFE ID parses per the SPIFFE spec.
- *   4. Trust domain is the local fetcher's own domain (federation is unsupported).
+ *   4. Trust domain is the local domain or a configured federated domain whose
+ *      bundle is currently available. With federation configured, the peer
+ *      chain must lead to the bundle of the peer's own trust domain.
  *   5. Remaining TTL is >= `minTtlSeconds` and not yet expired / not yet valid.
  *   6. SPIFFE ID matches at least one `allowedCallers` entry.
  *
@@ -38,7 +42,11 @@ export class SpiffeValidator implements SvidValidator {
     private readonly ownFetcher: SvidFetcher,
   ) {}
 
-  async validate(peerCertDer: Uint8Array, now: Date = new Date()): Promise<ValidationResult> {
+  async validate(
+    peerCertDer: Uint8Array,
+    now: Date = new Date(),
+    peerChainDer?: readonly Uint8Array[],
+  ): Promise<ValidationResult> {
     let cert: X509Certificate;
     try {
       cert = new X509Certificate(Buffer.from(peerCertDer));
@@ -62,7 +70,8 @@ export class SpiffeValidator implements SvidValidator {
     }
 
     // Trust domain check
-    const allowedTds = await this.allowedTrustDomains();
+    const own = await this.ownFetcher.getX509Svid();
+    const allowedTds = this.allowedTrustDomains(own);
     if (!allowedTds.has(parsedId.trustDomain)) {
       return fail(
         new TrustDomainMismatchError(
@@ -70,6 +79,18 @@ export class SpiffeValidator implements SvidValidator {
           parsedId.full,
         ),
       );
+    }
+    const federated = this.options.federatedTrustDomains ?? [];
+    if (peerChainDer !== undefined || federated.length > 0) {
+      const anchors = anchorsFor(own, parsedId.trustDomain, federated);
+      if (!verifyPathToAnchors(peerCertDer, peerChainDer ?? [], anchors, now)) {
+        return fail(
+          new TrustDomainMismatchError(
+            `peer chain does not lead to the trust bundle of ${parsedId.trustDomain}`,
+            parsedId.full,
+          ),
+        );
+      }
     }
 
     // Validity window
@@ -119,12 +140,18 @@ export class SpiffeValidator implements SvidValidator {
     };
   }
 
-  // Federation is unsupported: only the local trust domain can ever be accepted.
-  private async allowedTrustDomains(): Promise<ReadonlySet<TrustDomainString>> {
-    const own = (await this.ownFetcher.getX509Svid()).spiffeId.trustDomain;
+  /** Local domain plus configured federated domains with a current bundle, narrowed by any pin. */
+  private allowedTrustDomains(own: X509Svid): ReadonlySet<TrustDomainString> {
+    const local = own.spiffeId.trustDomain;
+    const candidates = [
+      local,
+      ...(this.options.federatedTrustDomains ?? []).filter(
+        (td) => td !== local && (own.federatedBundles?.get(td)?.length ?? 0) > 0,
+      ),
+    ];
     const pinned = this.options.allowedTrustDomains;
-    if (pinned && pinned.length > 0 && !pinned.includes(own)) return new Set();
-    return new Set([own]);
+    if (!pinned || pinned.length === 0) return new Set(candidates);
+    return new Set(candidates.filter((td) => pinned.includes(td)));
   }
 }
 
@@ -135,13 +162,28 @@ export class SpiffeValidator implements SvidValidator {
  * Node returns SAN as a string like: `URI:spiffe://td/foo, DNS:example.com`.
  * SPIFFE mandates exactly one URI SAN containing the ID.
  */
-function extractSpiffeUriFromSan(san: string | undefined): string | null {
+export function extractSpiffeUriFromSan(san: string | undefined): string | null {
   if (!san) return null;
   const entries = san.split(',').map((s) => s.trim());
   const uris = entries.filter((e) => e.startsWith('URI:')).map((e) => e.slice('URI:'.length));
   const spiffeUris = uris.filter((u) => u.startsWith('spiffe://'));
   if (spiffeUris.length !== 1) return null;
   return spiffeUris[0] ?? null;
+}
+
+/**
+ * Anchors that may authenticate `trustDomain`: the local bundle for the local
+ * domain, or the federated bundle of a configured federated domain. Empty when
+ * the domain is not trusted.
+ */
+export function anchorsFor(
+  own: X509Svid,
+  trustDomain: TrustDomainString,
+  federated: readonly TrustDomainString[],
+): readonly Uint8Array[] {
+  if (trustDomain === own.spiffeId.trustDomain) return own.trustBundle;
+  if (!federated.includes(trustDomain)) return [];
+  return own.federatedBundles?.get(trustDomain) ?? [];
 }
 
 function fail(

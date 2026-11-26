@@ -82,6 +82,7 @@ import { createMcpSpiffeBridge } from '../src/bridge.js';
 import { ConfigInvalidError } from '../src/errors.js';
 import { WorkloadApiSvidFetcher } from '../src/svid/fetcher.js';
 import type { X509Svid } from '../src/types.js';
+import { syntheticCa } from './helpers/pki.js';
 import { makeSpiffeCert } from './helpers/test-certs.js';
 
 describe('WorkloadApiSvidFetcher', () => {
@@ -132,6 +133,61 @@ describe('WorkloadApiSvidFetcher', () => {
     const svid = await fetcher.getX509Svid();
     expect(svid.spiffeId.full).toBe('spiffe://td.test/workload/a');
     expect(svid.trustBundle).toHaveLength(1);
+    expect(svid.crls).toBeUndefined();
+  });
+
+  it('keys federated bundles by trust domain name and drops unusable entries', async () => {
+    const fetcher = makeFetcher();
+    const cert = await makeSpiffeCert({ spiffeId: 'spiffe://td.test/workload/a' });
+    const partner = await makeSpiffeCert({ spiffeId: 'spiffe://partner.test/ca' });
+    const other = await makeSpiffeCert({ spiffeId: 'spiffe://other.test/ca' });
+    currentCall.queue.push({
+      svids: [
+        {
+          spiffeId: 'spiffe://td.test/workload/a',
+          x509Svid: cert.certDer,
+          x509SvidKey: cert.privateKeyDer,
+          bundle: cert.certDer,
+          hint: '',
+        },
+      ],
+      federatedBundles: {
+        'spiffe://partner.test': partner.certDer,
+        'other.test': other.certDer,
+        'spiffe://td.test': other.certDer,
+        'spiffe://bad.test/path': other.certDer,
+        'Not A Domain': other.certDer,
+        'empty.test': new Uint8Array(),
+      },
+      crl: [],
+    });
+    const svid = await fetcher.getX509Svid();
+    expect([...(svid.federatedBundles?.keys() ?? [])].sort()).toEqual([
+      'other.test',
+      'partner.test',
+    ]);
+    expect(svid.federatedBundles?.get('partner.test' as never)).toEqual([partner.certDer]);
+  });
+
+  it('surfaces well-formed CRLs from the snapshot', async () => {
+    const fetcher = makeFetcher();
+    const cert = await makeSpiffeCert({ spiffeId: 'spiffe://td.test/workload/a' });
+    const crl = await (await syntheticCa()).crl(['0a01']);
+    currentCall.queue.push({
+      svids: [
+        {
+          spiffeId: 'spiffe://td.test/workload/a',
+          x509Svid: cert.certDer,
+          x509SvidKey: cert.privateKeyDer,
+          bundle: cert.certDer,
+          hint: '',
+        },
+      ],
+      federatedBundles: {},
+      crl: [crl],
+    });
+    const svid = await fetcher.getX509Svid();
+    expect(svid.crls).toEqual([crl]);
   });
 
   it('fires the rotation callback when a new SVID arrives', async () => {
@@ -251,13 +307,30 @@ describe('WorkloadApiSvidFetcher', () => {
     await bridge.stop();
   });
 
+  it('closes the audit logger on stop', async () => {
+    const logger = { log: vi.fn(), close: vi.fn(async () => {}) };
+    const bridge = createMcpSpiffeBridge({
+      workloadApi: { socketPath: '/tmp/fake.sock', rpcTimeoutMs: 20 },
+      validator: { allowedCallers: ['spiffe://example.org/agent/research'], minTtlSeconds: 5 },
+      transport: { mode: 'stdio-identity-only' },
+      audit: { logger },
+    });
+    expect(bridge.isReady()).toBe(false);
+    await bridge.stop();
+    expect(logger.close).toHaveBeenCalledTimes(1);
+    expect(bridge.isReady()).toBe(false);
+  });
+
   it.each([
-    [['example.org'], true],
-    [['example.org', 'partner.example.net'], false],
-    [['partner.example.net'], false],
+    [['example.org'], undefined, true],
+    [['example.org', 'partner.example.net'], undefined, false],
+    [['partner.example.net'], undefined, false],
+    [['example.org', 'partner.example.net'], ['partner.example.net'], true],
+    [undefined, ['partner.example.net'], true],
+    [undefined, ['example.org'], false],
   ])(
-    'checks allowedTrustDomains %j against the local trust domain at startup',
-    async (domains, ok) => {
+    'checks allowedTrustDomains %j with federatedTrustDomains %j at startup',
+    async (domains, federated, ok) => {
       const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
       currentCall.queue.push(responseFor(cert));
       const bridge = createMcpSpiffeBridge({
@@ -265,13 +338,15 @@ describe('WorkloadApiSvidFetcher', () => {
         validator: {
           allowedCallers: ['spiffe://example.org/agent/research'],
           minTtlSeconds: 5,
-          allowedTrustDomains: domains,
+          ...(domains ? { allowedTrustDomains: domains } : {}),
+          ...(federated ? { federatedTrustDomains: federated } : {}),
         },
         transport: { mode: 'stdio-identity-only' },
       });
       try {
         if (ok) await expect(bridge.start()).resolves.toBeUndefined();
         else await expect(bridge.start()).rejects.toThrow(ConfigInvalidError);
+        expect(bridge.isReady()).toBe(ok);
       } finally {
         await bridge.stop();
       }
@@ -350,6 +425,47 @@ describe('bounded stream recovery', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('retries without limit by default, within the backoff cap', async () => {
+    vi.useFakeTimers();
+    const reconnects = vi.fn();
+    fetcher = new WorkloadApiSvidFetcher(
+      {
+        socketPath: '/tmp/fake.sock',
+        rpcTimeoutMs: 1000,
+        connectTimeoutMs: 50,
+        reconnect: { initialDelayMs: 10, maxDelayMs: 20 },
+      },
+      { metrics: { increment: reconnects } },
+    );
+    const health: boolean[] = [];
+    fetcher.watchAvailability((available) => health.push(available));
+    for (let i = 0; i < 30; i++) {
+      currentCall.queue.end();
+      if (i === 0) await expect(fetcher.getX509Svid()).rejects.toThrow('stream unavailable');
+      currentCall = makeCall();
+      await vi.advanceTimersByTimeAsync(20);
+    }
+    expect(callCount).toBeGreaterThan(30);
+    expect(reconnects).toHaveBeenCalledWith('workload_api_reconnect', undefined);
+    await expect(fetcher.getX509Svid()).rejects.toThrow('stream unavailable');
+    const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
+    currentCall.queue.push(responseFor(cert));
+    await vi.advanceTimersByTimeAsync(20);
+    expect((await fetcher.getX509Svid()).spiffeId.full).toBe('spiffe://example.org/agent/research');
+    expect(health.at(-1)).toBe(true);
+  });
+
+  it('keeps every jittered delay at or below the cap', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999);
+    const f = recovering(3);
+    currentCall.queue.end();
+    await expect(f.getX509Svid()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(20 * 3);
+    expect(callCount).toBe(4);
+    random.mockRestore();
+  });
+
   it('cancels backoff immediately on shutdown', async () => {
     vi.useFakeTimers();
     const f = recovering();
@@ -373,7 +489,7 @@ describe('bounded stream recovery', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each(['empty', 'wrong-key', 'wrong-identity', 'crl'])(
+  it.each(['empty', 'wrong-key', 'wrong-identity', 'malformed-crl'])(
     'invalidates rather than ignoring an invalid %s update',
     async (kind) => {
       const cert = await makeSpiffeCert({ spiffeId: 'spiffe://example.org/agent/research' });
@@ -388,7 +504,7 @@ describe('bounded stream recovery', () => {
         invalid.svids[0].x509SvidKey = other.privateKeyDer;
       if (kind === 'wrong-identity' && invalid.svids[0])
         invalid.svids[0].spiffeId = 'spiffe://example.org/another';
-      if (kind === 'crl') invalid.crl = [new Uint8Array([1])];
+      if (kind === 'malformed-crl') invalid.crl = [new Uint8Array([1])];
       currentCall.queue.push(invalid);
       await vi.advanceTimersByTimeAsync(0);
       await expect(f.getX509Svid()).rejects.toThrow('stream unavailable');

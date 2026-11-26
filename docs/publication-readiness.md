@@ -4,9 +4,10 @@ This page defines acceptance criteria, not an approval badge. Publication stays
 separate from local preparation. No remote deployment is implied by a successful
 local documentation build.
 
-!!! note "Not published"
-    This repository is not published yet. Publication is a separate maintainer
-    decision.
+!!! note "Not published to npm"
+    The package is not published to npm yet. Publication is a separate
+    maintainer decision. Remaining release gates are tracked in
+    [production readiness](production-readiness.md).
 
 ## Reproduce the project
 
@@ -18,15 +19,17 @@ pnpm typecheck
 pnpm test
 pnpm lint
 pnpm build
+pnpm run check:package
 ```
 
-Run the [installed package demo](installed-demo.md), then follow the separate
+Run the [installed package demo](installed-demo.md) and the
+[SPIRE bench](spire-bench.md), then follow the separate
 [shared lab guide](kubernetes-lab.md) when that integration run is authorized. Capture the source revision, environment,
 command, observed positive and negative outcomes and cleanup result. Saved
 screenshots or an older report must identify their capture date. Re-run an
 applicable integration check after changing the behavior it exercises.
 
-The bridge is a library. Its executable product demo is the FHIR gateway in the shared security lab. Real TLS 1.3 (and opt-in TLS 1.2) credential-loss and trust-root tests complement the shared SPIRE scenarios.
+The bridge is a library. Its executable product demo is the FHIR gateway in the shared security lab. The SPIRE bench in this repository covers two federated SPIRE trust domains; real TLS 1.3 (and opt-in TLS 1.2) credential-loss and trust-root unit tests complement both.
 
 ## Build the documentation
 
@@ -62,18 +65,21 @@ strict docs build and retain its evidence.
 |---|---|---|
 | Pre-commit hook | Local, after `lefthook install` | Biome on staged files and `gitleaks git --pre-commit --staged` |
 | Full history scan | Local, before publication | `gitleaks git --log-opts=--all --redact --config .gitleaks.toml` |
-| CI `secrets` job | GitHub Actions, once published | gitleaks action plus the same full history scan |
+| CI `secrets` job | GitHub Actions, on pull requests and pushes to `main` | Full history scan with a checksum-verified gitleaks binary |
 
 `.gitleaks.toml` extends the default gitleaks rules with generic checks for
 absolute home directory paths and `op://` secret references. The hook needs the
-standalone `lefthook` and `gitleaks` binaries. The CI job does not run until the
-repository is published. Remote CI and the resulting
-Pages URL still need verification after publication is explicitly authorized.
+standalone `lefthook` and `gitleaks` binaries. The Pages URL still needs
+verification after the owner enables Pages.
 
 Generator behavior and configuration follow the
 [official Zensical guide](https://zensical.org/docs/create-your-site/).
 
 ## Local verification - 2026-10-12
+
+!!! note "Superseded"
+    Historical record. Test counts, lint warnings and archive contents changed
+    after this date; see the 2026-11-26 record below.
 
 Base revision `2235f40`, plus the installed-demo verifier and
 documentation changes. Node v26.10.0, pnpm 9.15.0. Typecheck, build and
@@ -88,6 +94,20 @@ Archive SHA-256: `b3f6c41bb8a3b4942014fb27c9478660aa2c75e50ecd001efdc5a8356ad2bb
 Strict Zensical build passed. This is local package and synthetic-certificate
 evidence, not a new shared SPIRE run. No publication or
 remote CI was performed.
+
+## Local verification - 2026-11-26
+
+Revision `288c092` on `feat/production-readiness`. Node v26.10.0, pnpm 12.14.0.
+`biome ci .` reported one formatting error in `biome.json` at that revision,
+fixed in `0e71a68` and clean afterwards with no warnings. Typecheck and build passed, 176 tests in
+14 files passed, and `pnpm run check:package` passed: 40 tarball entries, no
+source, tests or secrets, CommonJS and ESM consumers type-check and load.
+`scripts/verify-installed.mjs` passed against an independently installed
+archive (denial, missing certificate, credential loss, fresh-credential
+recovery, cleanup). The [SPIRE bench](spire-bench.md) passed 18 of 18 checks.
+Strict Zensical 0.0.65 build passed. No publication was performed.
+
+Archive SHA-256: `9e3084c4c0bf8c50f97d5a803389b86e0d4b5e40a18e58db439a53c5773e78e1`.
 
 ## Revision references
 

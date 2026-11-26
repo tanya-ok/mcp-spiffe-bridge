@@ -45,5 +45,5 @@ Server certificate validation stays enabled. Certificates use `example.org`
 SPIFFE IDs and are generated at runtime; no real keys or Workload API socket are
 needed. The verifier opens only a temporary loopback listener.
 
-!!! note "Not published"
-    This repository and package are not published yet.
+!!! note "Not published to npm"
+    The package is not published to npm yet.
